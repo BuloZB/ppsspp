@@ -12,7 +12,7 @@
 #include "Common/UI/Root.h"
 #include "Common/Render/DrawBuffer.h"
 
-static const bool ClickDebug = false;
+static constexpr bool ClickDebug = false;
 
 UIScreen::UIScreen() : Screen() {
 	lastOrientation_ = GetDeviceOrientation();
@@ -262,6 +262,10 @@ void UIDialogScreen::sendMessage(UIMessage message, const char *value) {
 	if (screen) {
 		screen->sendMessage(message, value);
 	}
+}
+
+bool UIScreen::IsOnTop() const {
+	return screenManager()->topScreen() == this;
 }
 
 void UIScreen::OnBack(UI::EventParams &e) {

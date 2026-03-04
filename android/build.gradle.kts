@@ -36,10 +36,15 @@ val isDirty = providers.git("status", "--porcelain")
 	.lineSequence()
 	.any { it.isNotBlank() && !it.startsWith("??") } // untrackedIsDirty = false
 
-val (major, minor, patch) = gitTag
+val versionParts = gitTag
 	.removePrefix("v")
 	.split(".")
-	.map { it.toInt() }
+	.mapNotNull { it.toIntOrNull() }
+
+// Ensure we have at least 3 components by padding with 0
+val major = versionParts.getOrElse(0) { 0 }
+val minor = versionParts.getOrElse(1) { 0 }
+val patch = versionParts.getOrElse(2) { 0 }
 
 val gitVersionName = buildString {
 	append(gitTag)
@@ -292,3 +297,12 @@ afterEvaluate {
 		println(it)
 	}
 }*/
+
+// Use the below to get a lot of deprecation warnings.
+// Not really useful to fix most of them though, as the old paths are often needed to support
+// old Android versions.
+/*
+tasks.withType<JavaCompile> {
+	options.compilerArgs.addAll(listOf("-Xlint:deprecation"))
+}
+*/

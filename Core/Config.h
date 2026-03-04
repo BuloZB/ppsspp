@@ -410,7 +410,7 @@ public:
 
 	bool bExtraAudioBuffering;  // For bluetooth
 	std::string sAudioDevice;
-	bool bAutoAudioDevice;
+	bool bAutoSwitchAudioDevice;
 	bool bUseOldAtrac;
 
 	// iOS only for now
@@ -515,8 +515,9 @@ public:
 	// Sets up how much the analog limiter button restricts digital->analog input.
 	float fAnalogLimiterDeadzone;
 
-	// Trigger configuration
+	// Thresholds for triggers and stick when mapped to digital button inputs.
 	float fAnalogTriggerThreshold;
+	float fAnalogStickThreshold;
 
 	// Sets whether combo mapping is enabled.
 	bool bAllowMappingCombos;

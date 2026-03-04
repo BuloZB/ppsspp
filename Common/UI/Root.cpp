@@ -87,6 +87,7 @@ void SetFocusedView(View *view, bool force) {
 }
 
 void EnableFocusMovement(bool enable) {
+	// INFO_LOG(Log::UI, "EnableFocusMovement: %s", enable ? "true" : "false");
 	focusMovementEnabled = enable;
 	if (!enable) {
 		if (focusedView) {
@@ -103,16 +104,16 @@ bool IsFocusMovementEnabled() {
 void LayoutViewHierarchy(const UIContext &dc, const UI::Margins &rootMargins, ViewGroup *root, bool ignoreInsets, bool ignoreBottomInset) {
 	Bounds rootBounds = ignoreInsets ? dc.GetBounds() : dc.GetLayoutBounds(ignoreBottomInset);
 
-	MeasureSpec horiz(EXACTLY, rootBounds.w);
-	MeasureSpec vert(EXACTLY, rootBounds.h);
+	MeasureSpec horiz(EXACTLY, rootBounds.w - (rootMargins.left + rootMargins.right));
+	MeasureSpec vert(EXACTLY, rootBounds.h - (rootMargins.top + rootMargins.bottom));
 
 	// Two phases - measure contents, layout.
 	root->Measure(dc, horiz, vert);
 	// Root has a specified size. Set it, then let root layout all its children.
 	rootBounds.x += rootMargins.left;
 	rootBounds.y += rootMargins.top;
-	rootBounds.w -= rootMargins.right;
-	rootBounds.h -= rootMargins.bottom;
+	rootBounds.w -= rootMargins.left + rootMargins.right;
+	rootBounds.h -= rootMargins.top + rootMargins.bottom;
 	root->SetBounds(rootBounds);
 	root->Layout();
 }
