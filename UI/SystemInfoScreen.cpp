@@ -76,9 +76,13 @@ void SystemInfoScreen::CreateTabs() {
 	using namespace UI;
 
 	auto si = GetI18NCategory(I18NCat::SYSINFO);
+	auto ms = GetI18NCategory(I18NCat::MAINSETTINGS);
 
 	AddTab("Device Info", si->T("Device Info"), [this](UI::LinearLayout *parent) {
 		CreateDeviceInfoTab(parent);
+	});
+	AddTab("Audio", ms->T("Audio"), [this](UI::LinearLayout *parent) {
+		CreateAudioInfoTab(parent);
 	});
 	AddTab("Storage", si->T("Storage"), [this](UI::LinearLayout *parent) {
 		CreateStorageTab(parent);
@@ -215,24 +219,6 @@ void SystemInfoScreen::CreateDeviceInfoTab(UI::LinearLayout *deviceSpecs) {
 #endif
 	osInformation->Add(new InfoItem(si->T("PPSSPP build"), build));
 
-	CollapsibleSection *audioInformation = deviceSpecs->Add(new CollapsibleSection(si->T("Audio Information")));
-	extern AudioBackend *g_audioBackend;
-	if (g_audioBackend) {
-		char fmtStr[256];
-		g_audioBackend->DescribeOutputFormat(fmtStr, sizeof(fmtStr));
-		audioInformation->Add(new InfoItem(si->T("Stream format"), fmtStr));
-	} else {
-		audioInformation->Add(new InfoItem(si->T("Sample rate"), StringFromFormat(si->T_cstr("%d Hz"), System_GetPropertyInt(SYSPROP_AUDIO_SAMPLE_RATE))));
-	}
-	int framesPerBuffer = System_GetPropertyInt(SYSPROP_AUDIO_FRAMES_PER_BUFFER);
-	if (framesPerBuffer > 0) {
-		audioInformation->Add(new InfoItem(si->T("Frames per buffer"), StringFromFormat("%d", framesPerBuffer)));
-	}
-#if PPSSPP_PLATFORM(ANDROID)
-	audioInformation->Add(new InfoItem(si->T("Optimal sample rate"), StringFromFormat(si->T_cstr("%d Hz"), System_GetPropertyInt(SYSPROP_AUDIO_OPTIMAL_SAMPLE_RATE))));
-	audioInformation->Add(new InfoItem(si->T("Optimal frames per buffer"), StringFromFormat("%d", System_GetPropertyInt(SYSPROP_AUDIO_OPTIMAL_FRAMES_PER_BUFFER))));
-#endif
-
 	CollapsibleSection *displayInfo = deviceSpecs->Add(new CollapsibleSection(si->T("Display Information")));
 #if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(UWP)
 	displayInfo->Add(new InfoItem(si->T("Native resolution"), StringFromFormat("%dx%d",
@@ -264,8 +250,9 @@ void SystemInfoScreen::CreateDeviceInfoTab(UI::LinearLayout *deviceSpecs) {
 		System_GetPropertyFloat(SYSPROP_DISPLAY_SAFE_INSET_RIGHT),
 		System_GetPropertyFloat(SYSPROP_DISPLAY_SAFE_INSET_BOTTOM),
 	};
+	bool hasCameraCutout = System_GetPropertyBool(SYSPROP_DISPLAY_HAS_CAMERA_CUTOUT);
 	if (insets[0] != 0.0f || insets[1] != 0.0f || insets[2] != 0.0f || insets[3] != 0.0f) {
-		displayInfo->Add(new InfoItem(si->T("Screen notch insets"), StringFromFormat("%0.1f %0.1f %0.1f %0.1f", insets[0], insets[1], insets[2], insets[3])));
+		displayInfo->Add(new InfoItem(si->T("Screen notch insets"), StringFromFormat("%0.1f %0.1f %0.1f %0.1f : cutout=%d", insets[0], insets[1], insets[2], insets[3], hasCameraCutout)));
 	}
 
 	// Don't show on Windows, since it's always treated as 60 there.
@@ -425,6 +412,36 @@ void SystemInfoScreen::CreateCPUExtensionsTab(UI::LinearLayout *cpuExtensions) {
 	std::vector<std::string> exts = cpu_info.Features();
 	for (std::string &ext : exts) {
 		cpuExtensions->Add(new TextView(ext, new LayoutParams(FILL_PARENT, WRAP_CONTENT)))->SetFocusable(true);
+	}
+}
+
+void SystemInfoScreen::CreateAudioInfoTab(UI::LinearLayout *audio) {
+	using namespace UI;
+
+	auto si = GetI18NCategory(I18NCat::SYSINFO);
+	auto di = GetI18NCategory(I18NCat::DIALOG);
+	auto a = GetI18NCategory(I18NCat::AUDIO);
+
+	CollapsibleSection *audioInformation = audio->Add(new CollapsibleSection(si->T("Audio Information")));
+	extern AudioBackend *g_audioBackend;
+
+	if (g_audioBackend) {
+		audioInformation->Add(new InfoItem(a->T("Device"), g_audioBackend->GetCurrentDeviceName()));
+		char fmtStr[256];
+		g_audioBackend->DescribeOutputFormat(fmtStr, sizeof(fmtStr));
+		audioInformation->Add(new InfoItem(si->T("Stream format"), fmtStr));
+		std::string error = g_audioBackend->GetErrorString();
+		audioInformation->Add(new InfoItem(a->T("Audio Error"), error.empty() ? di->T("None") : error));
+	} else {
+		audioInformation->Add(new InfoItem(si->T("Sample rate"), StringFromFormat(si->T_cstr("%d Hz"), System_GetPropertyInt(SYSPROP_AUDIO_SAMPLE_RATE))));
+	}
+	int framesPerBuffer = System_GetPropertyInt(SYSPROP_AUDIO_FRAMES_PER_BUFFER);
+	if (framesPerBuffer > 0) {
+		audioInformation->Add(new InfoItem(si->T("Frames per buffer"), StringFromFormat("%d", framesPerBuffer)));
+	}
+	if (System_GetPropertyInt(SYSPROP_AUDIO_OPTIMAL_SAMPLE_RATE) > 0) {
+		audioInformation->Add(new InfoItem(si->T("Optimal sample rate"), StringFromFormat(si->T_cstr("%d Hz"), System_GetPropertyInt(SYSPROP_AUDIO_OPTIMAL_SAMPLE_RATE))));
+		audioInformation->Add(new InfoItem(si->T("Optimal frames per buffer"), StringFromFormat("%d", System_GetPropertyInt(SYSPROP_AUDIO_OPTIMAL_FRAMES_PER_BUFFER))));
 	}
 }
 

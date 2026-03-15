@@ -155,9 +155,7 @@
 #include <mach-o/dyld.h>
 #endif
 
-#if PPSSPP_PLATFORM(IOS) || PPSSPP_PLATFORM(MAC)
-#include "UI/DarwinFileSystemServices.h"
-#endif
+#include "Core/Util/DarwinFileSystemServices.h"
 
 #if !defined(__LIBRETRO__)
 #include "Core/Util/GameDB.h"
@@ -652,6 +650,7 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 	}
 
 	if (fileToLog) {
+		// Start logging immediately.
 		g_logManager.EnableOutput(LogOutput::File);
 		g_logManager.SetFileLogPath(Path(fileToLog));
 	} else {
@@ -930,6 +929,10 @@ void NativeShutdownGraphics() {
 		delete winMic;
 		winMic = nullptr;
 	}
+#endif
+
+#if PPSSPP_PLATFORM(IOS)
+	DarwinFileSystemServices::terminate();
 #endif
 
 	if (g_audioBackend) {

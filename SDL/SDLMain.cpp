@@ -76,7 +76,7 @@ SDLJoystick *joystick = NULL;
 #endif
 
 #if PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
-#include "UI/DarwinFileSystemServices.h"
+#include "Core/Util/DarwinFileSystemServices.h"
 #endif
 
 #if PPSSPP_PLATFORM(MAC)
@@ -555,6 +555,9 @@ void System_LaunchUrl(LaunchUrlType urlType, std::string_view url) {
 		OSXShowInFinder(std::string(url).c_str());
 #endif
 		// INFO_LOG(Log::System, "LaunchUrlType::LOCAL_FILE not implemented on this platform");
+		break;
+	default:
+		INFO_LOG(Log::System, "Unhandled LaunchUrlType %d", (int)urlType);
 		break;
 	}
 }
