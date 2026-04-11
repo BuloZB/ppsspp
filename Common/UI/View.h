@@ -950,8 +950,12 @@ public:
 	void SetOpenPtr(bool *open) {
 		toggle_ = open;
 	}
+	void SetUnderline(bool underline) {
+		underline_ = underline;
+	}
 private:
 	bool hasSubItems_ = true;
+	bool underline_ = true;
 };
 
 class BitCheckBox : public CheckBox {
@@ -1113,7 +1117,7 @@ public:
 
 	void FocusChanged(int focusFlags) override;
 
-	bool CanMoveFocus(FocusDirection dir) const { return dir != FocusDirection::FOCUS_LEFT && dir != FocusDirection::FOCUS_RIGHT; }
+	bool CanMoveFocus(FocusDirection dir) const override { return dir != FocusDirection::FOCUS_LEFT && dir != FocusDirection::FOCUS_RIGHT; }
 	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
 	void Draw(UIContext &dc) override;
 	std::string DescribeText() const override;
