@@ -375,8 +375,14 @@ struct GPUgstate {
 	int getScissorY1() const { return (scissor1 >> 10) & 0x3FF; }
 	int getScissorX2() const { return scissor2 & 0x3FF; }
 	int getScissorY2() const { return (scissor2 >> 10) & 0x3FF; }
+
+	// When drawing, these registers do weird stuff. Must be set to 0 for normal behavior.
 	int getRegionRateX() const { return 0x100 + (region1 & 0x3FF); }
 	int getRegionRateY() const { return 0x100 + ((region1 >> 10) & 0x3FF); }
+
+	// However when testing for bbox culling, these do act like X1/X2.
+	int getRegionX1() const { return (region1 & 0x3FF); }
+	int getRegionY1() const { return (region1 >> 10) & 0x3FF; }
 	int getRegionX2() const { return (region2 & 0x3FF); }
 	int getRegionY2() const { return (region2 >> 10) & 0x3FF; }
 
@@ -460,7 +466,7 @@ enum {
 	GPU_USE_BLEND_MINMAX = FLAG_BIT(4),
 	GPU_USE_LOGIC_OP = FLAG_BIT(5),
 	GPU_USE_FRAGMENT_UBERSHADER = FLAG_BIT(6),
-	GPU_USE_TEXTURE_NPOT = FLAG_BIT(7),
+	// Free bit: 7
 	GPU_USE_ANISOTROPY = FLAG_BIT(8),
 	GPU_USE_CLEAR_RAM_HACK = FLAG_BIT(9),
 	GPU_USE_INSTANCE_RENDERING = FLAG_BIT(10),
@@ -480,7 +486,8 @@ enum {
 	GPU_USE_CLIP_DISTANCE = FLAG_BIT(24),
 	GPU_USE_CULL_DISTANCE = FLAG_BIT(25),
 	GPU_USE_SHADER_BLENDING = FLAG_BIT(26),  // This is set to false when skip buffer effects is enabled and GPU_USE_FRAMEBUFFER_FETCH is not.
-
+	GPU_USE_NONBUFFERED_FLIP = FLAG_BIT(27),  // We use a flip hack to pretend the coordinate system is right-side-up, except if buffered rendering is off.
+	GPU_USE_PRE_ROTATION = FLAG_BIT(28),
 	// VR flags (reserved or in-use)
 	GPU_USE_VIRTUAL_REALITY = FLAG_BIT(29),
 	GPU_USE_SINGLE_PASS_STEREO = FLAG_BIT(30),
@@ -646,6 +653,13 @@ public:
 	float vpWidthScale;
 	float vpHeightScale;
 	float vpDepthScale;
+
+	// Cached 4x4 products of the matrices.
+	// Useful for culling and extracing the final Z from vertices (so we can check if clipping is needed).
+	// Most often, world changes the most.
+	// We recompute viewproj when view or proj changes, and worldviewproj when world, view, or proj changes.
+	float viewproj[16];
+	float worldviewproj[16];
 
 	KnownVertexBounds vertBounds;
 

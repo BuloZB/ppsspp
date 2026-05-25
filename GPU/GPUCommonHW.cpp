@@ -191,12 +191,12 @@ const CommonCommandTableEntry commonCommandTable[] = {
 	{ GE_CMD_ANTIALIASENABLE, FLAG_FLUSHBEFOREONCHANGE },
 
 	// Viewport.
-	{ GE_CMD_OFFSETX, FLAG_FLUSHBEFOREONCHANGE, DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE | DIRTY_CULL_PLANES },
-	{ GE_CMD_OFFSETY, FLAG_FLUSHBEFOREONCHANGE, DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE | DIRTY_CULL_PLANES },
-	{ GE_CMD_VIEWPORTXSCALE, FLAG_FLUSHBEFOREONCHANGE,  DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_CULLRANGE | DIRTY_PROJMATRIX | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULL_PLANES },
-	{ GE_CMD_VIEWPORTYSCALE, FLAG_FLUSHBEFOREONCHANGE,  DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_CULLRANGE | DIRTY_PROJMATRIX | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULL_PLANES },
-	{ GE_CMD_VIEWPORTXCENTER, FLAG_FLUSHBEFOREONCHANGE, DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_CULLRANGE | DIRTY_PROJMATRIX | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULL_PLANES },
-	{ GE_CMD_VIEWPORTYCENTER, FLAG_FLUSHBEFOREONCHANGE, DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_CULLRANGE | DIRTY_PROJMATRIX | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULL_PLANES },
+	{ GE_CMD_OFFSETX, FLAG_FLUSHBEFOREONCHANGE, DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE },
+	{ GE_CMD_OFFSETY, FLAG_FLUSHBEFOREONCHANGE, DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE },
+	{ GE_CMD_VIEWPORTXSCALE, FLAG_FLUSHBEFOREONCHANGE,  DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_CULLRANGE | DIRTY_PROJMATRIX | DIRTY_VIEWPORTSCISSOR_STATE },
+	{ GE_CMD_VIEWPORTYSCALE, FLAG_FLUSHBEFOREONCHANGE,  DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_CULLRANGE | DIRTY_PROJMATRIX | DIRTY_VIEWPORTSCISSOR_STATE },
+	{ GE_CMD_VIEWPORTXCENTER, FLAG_FLUSHBEFOREONCHANGE, DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_CULLRANGE | DIRTY_PROJMATRIX | DIRTY_VIEWPORTSCISSOR_STATE },
+	{ GE_CMD_VIEWPORTYCENTER, FLAG_FLUSHBEFOREONCHANGE, DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_CULLRANGE | DIRTY_PROJMATRIX | DIRTY_VIEWPORTSCISSOR_STATE },
 	{ GE_CMD_VIEWPORTZSCALE, FLAG_FLUSHBEFOREONCHANGE,  DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_CULLRANGE | DIRTY_DEPTHRANGE | DIRTY_PROJMATRIX | DIRTY_VIEWPORTSCISSOR_STATE },
 	{ GE_CMD_VIEWPORTZCENTER, FLAG_FLUSHBEFOREONCHANGE, DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_CULLRANGE | DIRTY_DEPTHRANGE | DIRTY_PROJMATRIX | DIRTY_VIEWPORTSCISSOR_STATE },
 	{ GE_CMD_DEPTHCLAMPENABLE, FLAG_FLUSHBEFOREONCHANGE, DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE | DIRTY_RASTER_STATE },
@@ -206,12 +206,12 @@ const CommonCommandTableEntry commonCommandTable[] = {
 	{ GE_CMD_MAXZ, FLAG_FLUSHBEFOREONCHANGE, DIRTY_DEPTHRANGE | DIRTY_RASTER_STATE | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE },
 
 	// Region
-	{ GE_CMD_REGION1, FLAG_FLUSHBEFOREONCHANGE, DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE | DIRTY_CULL_PLANES },
-	{ GE_CMD_REGION2, FLAG_FLUSHBEFOREONCHANGE, DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE | DIRTY_CULL_PLANES },
+	{ GE_CMD_REGION1, FLAG_FLUSHBEFOREONCHANGE, DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE },
+	{ GE_CMD_REGION2, FLAG_FLUSHBEFOREONCHANGE, DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE },
 
 	// Scissor
-	{ GE_CMD_SCISSOR1, FLAG_FLUSHBEFOREONCHANGE, DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE | DIRTY_CULL_PLANES },
-	{ GE_CMD_SCISSOR2, FLAG_FLUSHBEFOREONCHANGE, DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE | DIRTY_CULL_PLANES },
+	{ GE_CMD_SCISSOR1, FLAG_FLUSHBEFOREONCHANGE, DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE },
+	{ GE_CMD_SCISSOR2, FLAG_FLUSHBEFOREONCHANGE, DIRTY_FRAMEBUF | DIRTY_TEXTURE_PARAMS | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE },
 
 	// Lighting base colors
 	{ GE_CMD_AMBIENTCOLOR, FLAG_FLUSHBEFOREONCHANGE, DIRTY_AMBIENT },
@@ -583,9 +583,6 @@ u32 GPUCommonHW::CheckGPUFeatures() const {
 	if (draw_->GetDeviceCaps().anisoSupported) {
 		features |= GPU_USE_ANISOTROPY;
 	}
-	if (draw_->GetDeviceCaps().textureNPOTFullySupported) {
-		features |= GPU_USE_TEXTURE_NPOT;
-	}
 	if (draw_->GetDeviceCaps().dualSourceBlend) {
 		if (!g_Config.bVendorBugChecksEnabled || !draw_->GetBugs().Has(Draw::Bugs::DUAL_SOURCE_BLENDING_BROKEN)) {
 			features |= GPU_USE_DUALSOURCE_BLEND;
@@ -595,11 +592,11 @@ u32 GPUCommonHW::CheckGPUFeatures() const {
 		features |= GPU_USE_BLEND_MINMAX;
 	}
 
-	if (draw_->GetDeviceCaps().clipDistanceSupported) {
+	if (draw_->GetDeviceCaps().maxClipDistances >= 2) {
 		features |= GPU_USE_CLIP_DISTANCE;
 	}
 
-	if (draw_->GetDeviceCaps().cullDistanceSupported) {
+	if (draw_->GetDeviceCaps().maxCullDistances >= 1) {
 		features |= GPU_USE_CULL_DISTANCE;
 	}
 
@@ -612,7 +609,7 @@ u32 GPUCommonHW::CheckGPUFeatures() const {
 		features |= GPU_USE_DEPTH_CLAMP | GPU_USE_ACCURATE_DEPTH;
 	}
 
-	bool canClipOrCull = draw_->GetDeviceCaps().clipDistanceSupported || draw_->GetDeviceCaps().cullDistanceSupported;
+	bool canClipOrCull = draw_->GetDeviceCaps().maxClipDistances >= 2 || draw_->GetDeviceCaps().maxCullDistances >= 1;
 	bool canDiscardVertex = !draw_->GetBugs().Has(Draw::Bugs::BROKEN_NAN_IN_CONDITIONAL);
 	if ((canClipOrCull || canDiscardVertex) && !g_Config.bDisableRangeCulling) {
 		// We'll dynamically use the parts that are supported, to reduce artifacts as much as possible.
@@ -916,6 +913,7 @@ void GPUCommonHW::Execute_Prim(u32 op, u32 diff) {
 	PROFILE_THIS_SCOPE("execprim");
 
 	FlushImm();
+	UpdateMatrixProducts();
 
 	// Upper bits are ignored.
 	const GEPrimitiveType prim = static_cast<GEPrimitiveType>((op >> 16) & 7);
@@ -1046,7 +1044,7 @@ void GPUCommonHW::Execute_Prim(u32 op, u32 diff) {
 	bool passCulling = PASSES_CULLING;
 	if (!passCulling) {
 		// Do software culling.
-		if (drawEngineCommon_->TestBoundingBoxFast(verts, count, decoder, vertexType)) {
+		if (drawEngineCommon_->TestBoundingBoxFast(gstate_c.worldviewproj, verts, count, decoder, vertexType)) {
 			passCulling = true;
 		} else {
 			gpuStats.numCulledDraws++;
@@ -1136,7 +1134,7 @@ void GPUCommonHW::Execute_Prim(u32 op, u32 diff) {
 			if (!passCulling) {
 				// Do software culling.
 				_dbg_assert_((vertexType & GE_VTYPE_IDX_MASK) == GE_VTYPE_IDX_NONE);
-				if (drawEngineCommon_->TestBoundingBoxFast(verts, count, decoder, vertexType)) {
+				if (drawEngineCommon_->TestBoundingBoxFast(gstate_c.worldviewproj, verts, count, decoder, vertexType)) {
 					passCulling = true;
 				} else {
 					gpuStats.numCulledDraws++;
@@ -1301,6 +1299,8 @@ bail:
 }
 
 void GPUCommonHW::Execute_Bezier(u32 op, u32 diff) {
+	UpdateMatrixProducts();
+
 	// We don't dirty on normal changes anymore as we prescale, but it's needed for splines/bezier.
 	gstate_c.framebufFormat = gstate.FrameBufFormat();
 
@@ -1377,6 +1377,8 @@ void GPUCommonHW::Execute_Bezier(u32 op, u32 diff) {
 }
 
 void GPUCommonHW::Execute_Spline(u32 op, u32 diff) {
+	UpdateMatrixProducts();
+
 	// We don't dirty on normal changes anymore as we prescale, but it's needed for splines/bezier.
 	gstate_c.framebufFormat = gstate.FrameBufFormat();
 
@@ -1528,7 +1530,7 @@ void GPUCommonHW::Execute_WorldMtxNum(u32 op, u32 diff) {
 			if (dst[i] != newVal) {
 				Flush();
 				dst[i] = newVal;
-				gstate_c.Dirty(DIRTY_WORLDMATRIX);
+				gstate_c.Dirty(DIRTY_WORLDMATRIX | DIRTY_WORLD_VIEW_PROJ_MATRIX);
 			}
 			if (++i >= end) {
 				break;
@@ -1551,7 +1553,7 @@ void GPUCommonHW::Execute_WorldMtxData(u32 op, u32 diff) {
 	if (num < 12 && newVal != ((const u32 *)gstate.worldMatrix)[num]) {
 		Flush();
 		((u32 *)gstate.worldMatrix)[num] = newVal;
-		gstate_c.Dirty(DIRTY_WORLDMATRIX);
+		gstate_c.Dirty(DIRTY_WORLDMATRIX | DIRTY_WORLD_VIEW_PROJ_MATRIX);
 	}
 	num++;
 	gstate.worldmtxnum = (GE_CMD_WORLDMATRIXNUMBER << 24) | (num & 0x00FFFFFF);
@@ -1581,7 +1583,7 @@ void GPUCommonHW::Execute_ViewMtxNum(u32 op, u32 diff) {
 			if (dst[i] != newVal) {
 				Flush();
 				dst[i] = newVal;
-				gstate_c.Dirty(DIRTY_VIEWMATRIX | DIRTY_CULL_PLANES);
+				gstate_c.Dirty(DIRTY_VIEWMATRIX | DIRTY_WORLD_VIEW_PROJ_MATRIX | DIRTY_VIEW_PROJ_MATRIX);
 			}
 			if (++i >= end) {
 				break;
@@ -1604,7 +1606,7 @@ void GPUCommonHW::Execute_ViewMtxData(u32 op, u32 diff) {
 	if (num < 12 && newVal != ((const u32 *)gstate.viewMatrix)[num]) {
 		Flush();
 		((u32 *)gstate.viewMatrix)[num] = newVal;
-		gstate_c.Dirty(DIRTY_VIEWMATRIX | DIRTY_CULL_PLANES);
+		gstate_c.Dirty(DIRTY_VIEWMATRIX | DIRTY_WORLD_VIEW_PROJ_MATRIX | DIRTY_VIEW_PROJ_MATRIX);
 	}
 	num++;
 	gstate.viewmtxnum = (GE_CMD_VIEWMATRIXNUMBER << 24) | (num & 0x00FFFFFF);
@@ -1634,7 +1636,7 @@ void GPUCommonHW::Execute_ProjMtxNum(u32 op, u32 diff) {
 			if (dst[i] != newVal) {
 				Flush();
 				dst[i] = newVal;
-				gstate_c.Dirty(DIRTY_PROJMATRIX | DIRTY_CULL_PLANES);
+				gstate_c.Dirty(DIRTY_PROJMATRIX | DIRTY_WORLD_VIEW_PROJ_MATRIX | DIRTY_VIEW_PROJ_MATRIX);
 			}
 			if (++i >= end) {
 				break;
@@ -1657,7 +1659,7 @@ void GPUCommonHW::Execute_ProjMtxData(u32 op, u32 diff) {
 	if (num < 16 && newVal != ((const u32 *)gstate.projMatrix)[num]) {
 		Flush();
 		((u32 *)gstate.projMatrix)[num] = newVal;
-		gstate_c.Dirty(DIRTY_PROJMATRIX | DIRTY_CULL_PLANES);
+		gstate_c.Dirty(DIRTY_PROJMATRIX | DIRTY_WORLD_VIEW_PROJ_MATRIX | DIRTY_VIEW_PROJ_MATRIX);
 	}
 	num++;
 	if (num <= 16)
@@ -1817,7 +1819,7 @@ size_t GPUCommonHW::FormatGPUStatsCommon(char *buffer, size_t size) {
 	float vertexAverageCycles = gpuStats.numVertsSubmitted > 0 ? (float)gpuStats.vertexGPUCycles / (float)gpuStats.numVertsSubmitted : 0.0f;
 	return snprintf(buffer, size,
 		"DL processing time: %0.2f ms, %d drawsync, %d listsync\n"
-		"Draw: %d (%d dec, %d culled), flushes %d, clears %d, bbox jumps %d (%d updates)\n"
+		"Draw: %d (%d dec, %d culled), flushes %d, clears %d, bbox jumps %d\n"
 		"Vertices: %d dec: %d drawn: %d\n"
 		"FBOs active: %d (evaluations: %d, created %d)\n"
 		"Textures: %d, dec: %d, invalidated: %d, hashed: %d kB, clut %d\n"
@@ -1837,7 +1839,6 @@ size_t GPUCommonHW::FormatGPUStatsCommon(char *buffer, size_t size) {
 		gpuStats.numFlushes,
 		gpuStats.numClears,
 		gpuStats.numBBOXJumps,
-		gpuStats.numPlaneUpdates,
 		gpuStats.numVertsSubmitted,
 		gpuStats.numVertsDecoded,
 		gpuStats.numUncachedVertsDrawn,

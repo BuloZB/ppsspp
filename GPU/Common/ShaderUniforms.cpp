@@ -14,15 +14,9 @@
 
 using namespace Lin;
 
-static void ConvertProjMatrixToVulkan(Matrix4x4 &in) {
+static void ConvertProjMatrixToZeroToOneDepth(Matrix4x4 &in) {
 	const Vec3 trans(gstate_c.vpXOffset, gstate_c.vpYOffset, gstate_c.vpZOffset * 0.5f + 0.5f);
 	const Vec3 scale(gstate_c.vpWidthScale, gstate_c.vpHeightScale, gstate_c.vpDepthScale * 0.5f);
-	in.translateAndScale(trans, scale);
-}
-
-static void ConvertProjMatrixToD3D11(Matrix4x4 &in) {
-	const Vec3 trans(gstate_c.vpXOffset, -gstate_c.vpYOffset, gstate_c.vpZOffset * 0.5f + 0.5f);
-	const Vec3 scale(gstate_c.vpWidthScale, -gstate_c.vpHeightScale, gstate_c.vpDepthScale * 0.5f);
 	in.translateAndScale(trans, scale);
 }
 
@@ -72,6 +66,40 @@ void CalcCullRange(float minValues[4], float maxValues[4], bool flipViewport, bo
 	maxValues[3] = NAN;
 }
 
+// TODO: This will be removed later.
+static inline void FlipProjMatrix(Matrix4x4 & in) {
+	const bool invertedY = gstate_c.vpHeight < 0;
+	if (invertedY) {
+		in[1] = -in[1];
+		in[5] = -in[5];
+		in[9] = -in[9];
+		in[13] = -in[13];
+	}
+	const bool invertedX = gstate_c.vpWidth < 0;
+	if (invertedX) {
+		in[0] = -in[0];
+		in[4] = -in[4];
+		in[8] = -in[8];
+		in[12] = -in[12];
+	}
+}
+
+void UpdateRotation(float rotMatrix[4], bool useBufferedRendering) {
+	if (!gstate_c.Use(GPU_USE_PRE_ROTATION) || useBufferedRendering) {
+		rotMatrix[0] = 1.0f;
+		rotMatrix[1] = 0.0f;
+		rotMatrix[2] = 0.0f;
+		rotMatrix[3] = 1.0f;
+	} else {
+		const DisplayRotation rotation = g_display.rotation;
+		// The others are ROTATE_90 and so on.
+		rotMatrix[0] = rotation == DisplayRotation::ROTATE_0 ? 1.0 : (rotation == DisplayRotation::ROTATE_180 ? -1.0 : 0.0);
+		rotMatrix[1] = rotation == DisplayRotation::ROTATE_90 ? 1.0 : (rotation == DisplayRotation::ROTATE_270 ? -1.0 : 0.0);
+		rotMatrix[2] = rotation == DisplayRotation::ROTATE_270 ? 1.0 : (rotation == DisplayRotation::ROTATE_90 ? -1.0 : 0.0);
+		rotMatrix[3] = rotation == DisplayRotation::ROTATE_0 ? 1.0 : (rotation == DisplayRotation::ROTATE_180 ? -1.0 : 0.0);
+	}
+}
+
 void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipViewport, bool useBufferedRendering) {
 	if (dirtyUniforms & DIRTY_TEXENV) {
 		Uint8x3ToFloat3(ub->texEnvColor, gstate.texenvcolor);
@@ -115,52 +143,20 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 		Matrix4x4 flippedMatrix;
 		memcpy(&flippedMatrix, gstate.projMatrix, 16 * sizeof(float));
 
-		const bool invertedY = gstate_c.vpHeight < 0;
-		if (invertedY) {
-			flippedMatrix[1] = -flippedMatrix[1];
-			flippedMatrix[5] = -flippedMatrix[5];
-			flippedMatrix[9] = -flippedMatrix[9];
-			flippedMatrix[13] = -flippedMatrix[13];
-		}
-		const bool invertedX = gstate_c.vpWidth < 0;
-		if (invertedX) {
-			flippedMatrix[0] = -flippedMatrix[0];
-			flippedMatrix[4] = -flippedMatrix[4];
-			flippedMatrix[8] = -flippedMatrix[8];
-			flippedMatrix[12] = -flippedMatrix[12];
-		}
-		if (flipViewport) {
-			ConvertProjMatrixToD3D11(flippedMatrix);
-		} else {
-			ConvertProjMatrixToVulkan(flippedMatrix);
-		}
-
-		if (!useBufferedRendering && g_display.rotation != DisplayRotation::ROTATE_0) {
-			flippedMatrix = flippedMatrix * g_display.rot_matrix;
-		}
+		FlipProjMatrix(flippedMatrix);
+		ConvertProjMatrixToZeroToOneDepth(flippedMatrix);
 		CopyMatrix4x4(ub->proj, flippedMatrix.getReadPtr());
 
 		ub->rotation = useBufferedRendering ? 0 : (float)g_display.rotation;
 	}
 
 	if (dirtyUniforms & DIRTY_PROJTHROUGHMATRIX) {
-		Matrix4x4 proj_through;
-		if (flipViewport) {
-			proj_through.setOrthoD3D(0.0f, gstate_c.curRTWidth, gstate_c.curRTHeight, 0, 0, 1);
-		} else {
-			proj_through.setOrthoVulkan(0.0f, gstate_c.curRTWidth, 0, gstate_c.curRTHeight, 0, 1);
-		}
-		if (!useBufferedRendering && g_display.rotation != DisplayRotation::ROTATE_0) {
-			proj_through = proj_through * g_display.rot_matrix;
-		}
+		ub->xywh[0] = (float)gstate_c.curRTOffsetX;
+		ub->xywh[1] = (float)gstate_c.curRTOffsetY;
+		ub->xywh[2] = (float)gstate_c.curRTWidth;
+		ub->xywh[3] = (float)gstate_c.curRTHeight;
 
-		// Negative RT offsets come from split framebuffers (Killzone)
-		if (gstate_c.curRTOffsetX < 0 || gstate_c.curRTOffsetY < 0) {
-			proj_through.wx += 2.0f * (float)gstate_c.curRTOffsetX / (float)gstate_c.curRTWidth;
-			proj_through.wy += 2.0f * (float)gstate_c.curRTOffsetY / (float)gstate_c.curRTHeight;
-		}
-
-		CopyMatrix4x4(ub->proj_through, proj_through.getReadPtr());
+		ub->rotation = useBufferedRendering ? 0 : (float)g_display.rotation;
 	}
 
 	// Transform

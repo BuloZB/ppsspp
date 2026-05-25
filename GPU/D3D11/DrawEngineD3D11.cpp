@@ -55,8 +55,8 @@ enum {
 static const D3D11_INPUT_ELEMENT_DESC TransformedVertexElements[] = {
 	{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(TransformedVertex, pos), D3D11_INPUT_PER_VERTEX_DATA, 0 },
 	{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(TransformedVertex, uv), D3D11_INPUT_PER_VERTEX_DATA, 0 },
-	{ "COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, offsetof(TransformedVertex, color0), D3D11_INPUT_PER_VERTEX_DATA, 0 },
-	{ "COLOR", 1, DXGI_FORMAT_R8G8B8A8_UNORM, 0, offsetof(TransformedVertex, color1), D3D11_INPUT_PER_VERTEX_DATA, 0 },
+	{ "COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, offsetof(TransformedVertex, color0_32), D3D11_INPUT_PER_VERTEX_DATA, 0 },
+	{ "COLOR", 1, DXGI_FORMAT_R8G8B8A8_UNORM, 0, offsetof(TransformedVertex, color1_32), D3D11_INPUT_PER_VERTEX_DATA, 0 },
 	{ "NORMAL", 0, DXGI_FORMAT_R32_FLOAT, 0, offsetof(TransformedVertex, fog), D3D11_INPUT_PER_VERTEX_DATA, 0 },
 };
 
@@ -406,8 +406,6 @@ void DrawEngineD3D11::Flush() {
 		params.texCache = textureCache_;
 		params.allowClear = true;
 		params.allowSeparateAlphaClear = false;  // D3D11 doesn't support separate alpha clears
-		params.flippedY = false;
-		params.usesHalfZ = true;
 
 		if (gstate.getShadeMode() == GE_SHADE_FLAT) {
 			// We need to rotate the index buffer to simulate a different provoking vertex.
@@ -436,8 +434,8 @@ void DrawEngineD3D11::Flush() {
 
 		SoftwareTransform swTransform(params);
 
-		const Lin::Vec3 trans(gstate_c.vpXOffset, -gstate_c.vpYOffset, gstate_c.vpZOffset * 0.5f + 0.5f);
-		const Lin::Vec3 scale(gstate_c.vpWidthScale, -gstate_c.vpHeightScale, gstate_c.vpDepthScale * 0.5f);
+		const Lin::Vec3 trans(gstate_c.vpXOffset, gstate_c.vpYOffset, gstate_c.vpZOffset * 0.5f + 0.5f);
+		const Lin::Vec3 scale(gstate_c.vpWidthScale, gstate_c.vpHeightScale, gstate_c.vpDepthScale * 0.5f);
 		swTransform.SetProjMatrix(gstate.projMatrix, gstate_c.vpWidth < 0, gstate_c.vpHeight < 0, trans, scale);
 
 		swTransform.Transform(prim, swDec->VertexType(), swDec->GetDecVtxFmt(), numDecodedVerts_, &result);

@@ -17,11 +17,11 @@ enum : uint64_t {
 	DIRTY_MATDIFFUSE | DIRTY_MATSPECULAR | DIRTY_MATEMISSIVE | DIRTY_AMBIENT,
 };
 
-// Currently 496 bytes.
+// Currently 480 bytes.
 // Every line here is a 4-float.
 struct alignas(16) UB_VS_FS_Base {
 	float proj[16];
-	float proj_through[16];
+	float xywh[4];  // later, we could invert w and h here to avoid division.
 	float view[12];
 	float world[12];
 	float tex[12];
@@ -43,10 +43,11 @@ struct alignas(16) UB_VS_FS_Base {
 	// VR stuff is to go here, later. For normal drawing, we can then get away
 	// with just uploading the first 448 bytes of the struct (up to and including fogCoef).
 };
+static_assert(sizeof(UB_VS_FS_Base) == 432, "UB_VS_FS_Base should be 432 bytes");
 
 static const char * const ub_baseStr =
 R"(  mat4 u_proj;
-  mat4 u_proj_through;
+  vec4 u_xywh;
   mat3x4 u_view;
   mat3x4 u_world;
   mat3x4 u_texmtx;
@@ -84,6 +85,7 @@ struct alignas(16) UB_VS_Lights {
 	float lightDiffuse[4][4];
 	float lightSpecular[4][4];
 };
+static_assert(sizeof(UB_VS_Lights) == 512);  // it's ok to optimize this, it's just an assumption check.
 
 static const char * const ub_vs_lightsStr =
 R"(  vec4 u_ambient;
@@ -105,6 +107,7 @@ R"(  vec4 u_ambient;
 struct alignas(16) UB_VS_Bones {
 	float bones[8][12];
 };
+static_assert(sizeof(UB_VS_Bones) == 384);  // No way to optimize this further.
 
 static const char * const ub_vs_bonesStr =
 R"(	mat3x4 u_bone0; mat3x4 u_bone1; mat3x4 u_bone2; mat3x4 u_bone3; mat3x4 u_bone4; mat3x4 u_bone5; mat3x4 u_bone6; mat3x4 u_bone7; mat3x4 u_bone8;

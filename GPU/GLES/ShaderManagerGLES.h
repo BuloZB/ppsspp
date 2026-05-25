@@ -60,7 +60,7 @@ public:
 	int u_tex;
 	int u_proj;
 	int u_proj_lens;
-	int u_proj_through;
+	int u_xywh;
 	int u_texenv;
 	int u_view;
 	int u_texmtx;
@@ -68,7 +68,6 @@ public:
 	int u_depthRange;   // x,y = viewport xscale/xcenter. z,w=clipping minz/maxz (?)
 	int u_cullRangeMin;
 	int u_cullRangeMax;
-	int u_rotation;
 	int u_mipBias;
 	int u_scaleX;
 	int u_scaleY;

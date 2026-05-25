@@ -65,27 +65,15 @@ static void SwapUVs(TransformedVertex &a, TransformedVertex &b) {
 
 // Note: 0 is BR and 2 is TL.
 
-static void RotateUV(TransformedVertex v[4], bool flippedY) {
-	// We use the transformed tl/br coordinates to figure out whether they're flipped or not.
-	float ySign = flippedY ? -1.0 : 1.0;
-
+static void RotateUV(TransformedVertex v[4]) {
 	const float x1 = v[2].x;
 	const float x2 = v[0].x;
-	const float y1 = v[2].y * ySign;
-	const float y2 = v[0].y * ySign;
+	const float y1 = v[2].y;
+	const float y2 = v[0].y;
 
-	if ((x1 < x2 && y1 < y2) || (x1 > x2 && y1 > y2))
+	if ((x1 < x2 && y1 > y2) || (x1 > x2 && y1 < y2)) {
 		SwapUVs(v[1], v[3]);
-}
-
-static void RotateUVThrough(TransformedVertex v[4]) {
-	float x1 = v[2].x;
-	float x2 = v[0].x;
-	float y1 = v[2].y;
-	float y2 = v[0].y;
-
-	if ((x1 < x2 && y1 > y2) || (x1 > x2 && y1 < y2))
-		SwapUVs(v[1], v[3]);
+	}
 }
 
 // Clears on the PSP are best done by drawing a series of vertical strips
@@ -443,7 +431,7 @@ void SoftwareTransform::BuildDrawingParams(int prim, int vertexCount, u32 vertTy
 				// Take the bottom right alpha value of the first rect as the stencil value.
 				// Technically, each rect could individually fill its stencil, but most of the
 				// time they use the same one.
-				result->stencilValue = transformed[inds[1]].color0[3];
+				result->stencilValue = (u8)(transformed[inds[1]].color0_32 >> 24);
 			} else {
 				result->stencilValue = 0;
 			}
@@ -570,7 +558,7 @@ void SoftwareTransform::CalcCullParams(float &minZValue, float &maxZValue) const
 	maxZValue = 1.000030517578125f * gstate_c.vpDepthScale;
 	minZValue = -maxZValue;
 	// Scale and offset the Z appropriately, since we baked that into a projection transform.
-	if (params_.usesHalfZ) {
+	if (true) {  // all backends are "use half z" now
 		maxZValue = maxZValue * 0.5f + 0.5f + gstate_c.vpZOffset * 0.5f;
 		minZValue = minZValue * 0.5f + 0.5f + gstate_c.vpZOffset * 0.5f;
 	} else {
@@ -658,11 +646,7 @@ bool SoftwareTransform::ExpandRectangles(int vertexCount, int &numDecodedVerts, 
 		trans[3].v = transVtxBR.v * vscale;
 
 		// That's the four corners. Now process UV rotation.
-		if (throughmode) {
-			RotateUVThrough(trans);
-		} else {
-			RotateUV(trans, params_.flippedY);
-		}
+		RotateUV(trans);
 
 		// Triangle: BR-TR-TL
 		indsOut[0] = i * 2 + 0;

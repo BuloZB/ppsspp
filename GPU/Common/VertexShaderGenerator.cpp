@@ -363,6 +363,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		}
 		WRITE(p, "};\n");
 	} else {
+		// Non-Vulkan GLSL.
 		if (enableBones) {
 			const char * const * boneWeightDecl = boneWeightAttrDecl;
 			if (!strcmp(compat.attribute, "in")) {
@@ -409,7 +410,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		}
 
 		if (isModeThrough) {
-			WRITE(p, "uniform mat4 u_proj_through;\n");
+			WRITE(p, "uniform vec4 u_xywh;\n");
 			*uniformMask |= DIRTY_PROJTHROUGHMATRIX;
 		} else if (useHWTransform) {
 			if (gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
@@ -479,8 +480,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 				WRITE(p, "uniform lowp vec3 u_matemissive;\n");
 				*uniformMask |= DIRTY_MATSPECULAR | DIRTY_MATEMISSIVE;
 			}
-		} else {
-			WRITE(p, "uniform lowp float u_rotation;\n");
 		}
 
 		if (gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
@@ -747,26 +746,18 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		WRITE(p, "  %sv_fogdepth = fog;\n", compat.vsOutPrefix);
 		if (isModeThrough)	{
 			// The proj_through matrix already has the rotation, if needed.
-			WRITE(p, "  vec4 outPos = mul(u_proj_through, vec4(position.xyz, 1.0));\n");
+			// NOTE: In through mode, we can ignore W, it's always 1.0. However,
+			// this transform will later be applied in all modes.
+			WRITE(p, "  vec4 outPos;\n");
+			WRITE(p, "  outPos.xy = ((position.xy - u_xywh.xy * position.w) / u_xywh.zw) * 2.0 - 1.0;\n");
+			WRITE(p, "  outPos.zw = position.zw;\n");
+			// WRITE(p, "  vec4 outPos = mul(u_proj_through, vec4(position.xyz, 1.0));\n");
 		} else {
-			if (compat.shaderLanguage == GLSL_VULKAN) {
-				// Apply rotation from the uniform.
-				WRITE(p, "  mat2 displayRotation = mat2(\n");
-				WRITE(p, "    u_rotation == 0.0 ? 1.0 : (u_rotation == 2.0 ? -1.0 : 0.0), u_rotation == 1.0 ? 1.0 : (u_rotation == 3.0 ? -1.0 : 0.0),\n");
-				WRITE(p, "    u_rotation == 3.0 ? 1.0 : (u_rotation == 1.0 ? -1.0 : 0.0), u_rotation == 0.0 ? 1.0 : (u_rotation == 2.0 ? -1.0 : 0.0)\n");
-				WRITE(p, "  );\n");
-
-				WRITE(p, "  vec4 pos = position;\n");
-				WRITE(p, "  pos.xy = mul(displayRotation, pos.xy);\n");
-			} else {
-				WRITE(p, "  vec4 pos = position;\n");
-			}
-
 			// The viewport is used in this case, so need to compensate for that.
 			if (gstate_c.Use(GPU_ROUND_DEPTH_TO_16BIT)) {
-				WRITE(p, "  vec4 outPos = depthRoundZVP(pos);\n");
+				WRITE(p, "  vec4 outPos = depthRoundZVP(position);\n");
 			} else {
-				WRITE(p, "  vec4 outPos = pos;\n");
+				WRITE(p, "  vec4 outPos = position;\n");
 			}
 		}
 	} else {
@@ -1276,6 +1267,24 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		}
 	}
 
+	if (compat.shaderLanguage == GLSL_VULKAN && gstate_c.Use(GPU_USE_PRE_ROTATION)) {
+		// Apply rotation from the uniform.
+		WRITE(p, "  mat2 displayRotation = mat2(\n");
+		WRITE(p, "    u_rotation == 0.0 ? 1.0 : (u_rotation == 2.0 ? -1.0 : 0.0), u_rotation == 1.0 ? 1.0 : (u_rotation == 3.0 ? -1.0 : 0.0),\n");
+		WRITE(p, "    u_rotation == 3.0 ? 1.0 : (u_rotation == 1.0 ? -1.0 : 0.0), u_rotation == 0.0 ? 1.0 : (u_rotation == 2.0 ? -1.0 : 0.0)\n");
+		WRITE(p, "  );\n");
+
+		WRITE(p, "  outPos.xy = mul(displayRotation, outPos.xy);\n");
+	}
+
+	bool flipY = strlen(compat.viewportYSign) > 0;
+	if (gstate_c.Use(GPU_USE_NONBUFFERED_FLIP)) {
+		flipY = !flipY;
+	}
+	if (flipY) {
+		WRITE(p, "  outPos.y *= -1.0;\n");
+	}
+
 	// We've named the output gl_Position in HLSL as well.
 	WRITE(p, "  %sgl_Position = outPos;\n", compat.vsOutPrefix);
 
@@ -1288,6 +1297,12 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		// HUD scaling
 		WRITE(p, "  %sgl_Position.x *= u_scaleX;\n", compat.vsOutPrefix);
 		WRITE(p, "  %sgl_Position.y *= u_scaleY;\n", compat.vsOutPrefix);
+	}
+
+	if (compat.depthMinusOneToOne) {
+		// Convert from 0->1 to -1->1 depth range.
+		WRITE(p, "  %sgl_Position.z = %sgl_Position.z * 2.0 - %sgl_Position.w;\n", compat.vsOutPrefix, compat.vsOutPrefix, compat.vsOutPrefix);
+		// The formula takes the z component of gl_Position, which is currently in the range [0, w] (where w is the homogeneous coordinate), and transforms it to the range [-w, w]. This is done by first multiplying by 2 to scale the range from [0, w] to [0, 2w], and then subtracting w to shift the range to [-w, w]. This effectively converts the depth range from 0->1 to -1->1 after perspective division (when gl_Position is divided by w).
 	}
 
 	if (needsZWHack) {

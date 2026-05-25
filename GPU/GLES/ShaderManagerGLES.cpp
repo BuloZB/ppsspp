@@ -105,7 +105,7 @@ LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, 
 
 	queries.push_back({ &u_proj, "u_proj" });
 	queries.push_back({ &u_proj_lens, "u_proj_lens" });
-	queries.push_back({ &u_proj_through, "u_proj_through" });
+	queries.push_back({ &u_xywh, "u_xywh" });
 	queries.push_back({ &u_texenv, "u_texenv" });
 	queries.push_back({ &u_fogcolor, "u_fogcolor" });
 	queries.push_back({ &u_fogcoef, "u_fogcoef" });
@@ -129,7 +129,6 @@ LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, 
 	queries.push_back({ &u_depthRange, "u_depthRange" });
 	queries.push_back({ &u_cullRangeMin, "u_cullRangeMin" });
 	queries.push_back({ &u_cullRangeMax, "u_cullRangeMax" });
-	queries.push_back({ &u_rotation, "u_rotation" });
 
 	// These two are only used for VR, but let's always query them for simplicity.
 	queries.push_back({ &u_scaleX, "u_scaleX" });
@@ -309,20 +308,14 @@ static void SetMatrix4x3(GLRenderManager *render, GLint *uniform, const float *m
 	render->SetUniformM4x4(uniform, m4x4);
 }
 
-static inline void ScaleProjMatrix(Matrix4x4 &in, bool useBufferedRendering) {
-	float yOffset = gstate_c.vpYOffset;
-	if (!useBufferedRendering) {
-		// GL upside down is a pain as usual.
-		yOffset = -yOffset;
-	}
-	const Vec3 trans(gstate_c.vpXOffset, yOffset, gstate_c.vpZOffset);
-	const Vec3 scale(gstate_c.vpWidthScale, gstate_c.vpHeightScale, gstate_c.vpDepthScale);
+static void ConvertProjMatrixToZeroToOneDepth(Matrix4x4 &in) {
+	const Vec3 trans(gstate_c.vpXOffset, gstate_c.vpYOffset, gstate_c.vpZOffset * 0.5f + 0.5f);
+	const Vec3 scale(gstate_c.vpWidthScale, gstate_c.vpHeightScale, gstate_c.vpDepthScale * 0.5f);
 	in.translateAndScale(trans, scale);
 }
 
-static inline void FlipProjMatrix(Matrix4x4 &in, bool useBufferedRendering) {
-
-	const bool invertedY = useBufferedRendering ? (gstate_c.vpHeight < 0) : (gstate_c.vpHeight > 0);
+static inline void FlipProjMatrix(Matrix4x4 &in) {
+	const bool invertedY = gstate_c.vpHeight < 0;
 	if (invertedY) {
 		in[1] = -in[1];
 		in[5] = -in[5];
@@ -435,8 +428,8 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, bool useBufferedRenderin
 			}
 			UpdateVRParams(gstate.projMatrix);
 
-			FlipProjMatrix(vrProjection, useBufferedRendering);
-			ScaleProjMatrix(vrProjection, useBufferedRendering);
+			FlipProjMatrix(vrProjection);
+			ConvertProjMatrixToZeroToOneDepth(vrProjection);
 
 			render_->SetUniformM4x4(&u_proj_lens, vrProjection.m);
 		}
@@ -444,20 +437,18 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, bool useBufferedRenderin
 		Matrix4x4 flippedMatrix;
 		memcpy(&flippedMatrix, gstate.projMatrix, 16 * sizeof(float));
 
-		FlipProjMatrix(flippedMatrix, useBufferedRendering);
-		ScaleProjMatrix(flippedMatrix, useBufferedRendering);
+		FlipProjMatrix(flippedMatrix);
+		ConvertProjMatrixToZeroToOneDepth(flippedMatrix);
 
 		render_->SetUniformM4x4(&u_proj, flippedMatrix.m);
-		render_->SetUniformF1(&u_rotation, useBufferedRendering ? 0 : (float)g_display.rotation);
 	}
 	if (dirty & DIRTY_PROJTHROUGHMATRIX) {
-		Matrix4x4 proj_through;
-		if (useBufferedRendering) {
-			proj_through.setOrtho(0.0f, gstate_c.curRTWidth, 0.0f, gstate_c.curRTHeight, 0.0f, 1.0f);
-		} else {
-			proj_through.setOrtho(0.0f, gstate_c.curRTWidth, gstate_c.curRTHeight, 0.0f, 0.0f, 1.0f);
-		}
-		render_->SetUniformM4x4(&u_proj_through, proj_through.getReadPtr());
+		float xywh[4];
+		xywh[0] = (float)gstate_c.curRTOffsetX;
+		xywh[1] = (float)gstate_c.curRTOffsetY;
+		xywh[2] = (float)gstate_c.curRTWidth;
+		xywh[3] = (float)gstate_c.curRTHeight;
+		SetFloatUniform4(render_, &u_xywh, xywh);
 	}
 	if (dirty & DIRTY_TEXENV) {
 		SetColorUniform3(render_, &u_texenv, gstate.texenvcolor);

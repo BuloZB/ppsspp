@@ -92,8 +92,8 @@ void DrawEngineGLES::InitDeviceObjects() {
 	std::vector<GLRInputLayout::Entry> entries;
 	entries.push_back({ ATTR_POSITION, 4, GL_FLOAT, GL_FALSE, offsetof(TransformedVertex, x) });
 	entries.push_back({ ATTR_TEXCOORD, 3, GL_FLOAT, GL_FALSE, offsetof(TransformedVertex, u) });
-	entries.push_back({ ATTR_COLOR0, 4, GL_UNSIGNED_BYTE, GL_TRUE, offsetof(TransformedVertex, color0) });
-	entries.push_back({ ATTR_COLOR1, 3, GL_UNSIGNED_BYTE, GL_TRUE, offsetof(TransformedVertex, color1) });
+	entries.push_back({ ATTR_COLOR0, 4, GL_UNSIGNED_BYTE, GL_TRUE, offsetof(TransformedVertex, color0_32) });
+	entries.push_back({ ATTR_COLOR1, 3, GL_UNSIGNED_BYTE, GL_TRUE, offsetof(TransformedVertex, color1_32) });
 	entries.push_back({ ATTR_NORMAL, 1, GL_FLOAT, GL_FALSE, offsetof(TransformedVertex, fog) });
 	softwareInputLayout_ = render_->CreateInputLayout(entries, stride);
 
@@ -351,8 +351,6 @@ void DrawEngineGLES::Flush() {
 		params.texCache = textureCache_;
 		params.allowClear = true;  // Clear in OpenGL respects scissor rects, so we'll use it.
 		params.allowSeparateAlphaClear = true;
-		params.flippedY = framebufferManager_->UseBufferedRendering();
-		params.usesHalfZ = false;
 
 		// We need correct viewport values in gstate_c already.
 		if (gstate_c.IsDirty(DIRTY_VIEWPORTSCISSOR_STATE)) {
@@ -387,8 +385,7 @@ void DrawEngineGLES::Flush() {
 
 		const Lin::Vec3 trans(gstate_c.vpXOffset, gstate_c.vpYOffset, gstate_c.vpZOffset);
 		const Lin::Vec3 scale(gstate_c.vpWidthScale, gstate_c.vpHeightScale, gstate_c.vpDepthScale);
-		const bool invertedY = gstate_c.vpHeight * (params.flippedY ? 1.0 : -1.0f) < 0;
-		swTransform.SetProjMatrix(gstate.projMatrix, gstate_c.vpWidth < 0, invertedY, trans, scale);
+		swTransform.SetProjMatrix(gstate.projMatrix, gstate_c.vpWidth < 0, gstate_c.vpHeight < 0, trans, scale);
 
 		swTransform.Transform(prim, swDec->VertexType(), swDec->GetDecVtxFmt(), numDecodedVerts_, &result);
 		// Non-zero depth clears are unusual, but some drivers don't match drawn depth values to cleared values.
