@@ -45,7 +45,7 @@ enum GECommand : uint8_t {
 	GE_CMD_LIGHTENABLE1 = 0x19,
 	GE_CMD_LIGHTENABLE2 = 0x1A,
 	GE_CMD_LIGHTENABLE3 = 0x1B,
-	GE_CMD_DEPTHCLAMPENABLE = 0x1C,
+	GE_CMD_DEPTHCLIPENABLE = 0x1C,
 	GE_CMD_CULLFACEENABLE = 0x1D,
 	GE_CMD_TEXTUREMAPENABLE = 0x1E,
 	GE_CMD_FOGENABLE = 0x1F,
@@ -594,6 +594,8 @@ enum GEPrimitiveType : int8_t {
 	GE_PRIM_KEEP_PREVIOUS = 7,
 	GE_PRIM_INVALID = -1,
 };
+
+const char *GePrimTypeToString(GEPrimitiveType prim);
 
 enum GELogicOp : uint8_t {
 	GE_LOGIC_CLEAR = 0,

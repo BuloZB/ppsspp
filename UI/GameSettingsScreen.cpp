@@ -492,9 +492,6 @@ void GameSettingsScreen::CreateGraphicsSettings(UI::ViewGroup *graphicsSettings)
 	});
 	skipBufferEffects->SetDisabledPtr(&g_Config.bSoftwareRendering);
 
-	CheckBox *disableCulling = graphicsSettings->Add(new CheckBox(&g_Config.bDisableRangeCulling, gr->T("Disable culling")));
-	disableCulling->SetDisabledPtr(&g_Config.bSoftwareRendering);
-
 	static const char *skipGpuReadbackModes[] = { "No", "Skip", "Copy to texture" };
 
 	PopupMultiChoice *skipGPUReadbacks = graphicsSettings->Add(new PopupMultiChoice(&g_Config.iSkipGPUReadbackMode, gr->T("Skip GPU Readbacks"), skipGpuReadbackModes, 0, ARRAY_SIZE(skipGpuReadbackModes), I18NCat::GRAPHICS, screenManager()));
@@ -661,6 +658,8 @@ void GameSettingsScreen::CreateAudioSettings(UI::ViewGroup *audioSettings) {
 		System_Notify(SystemNotification::AUDIO_MODE_CHANGED);
 	});
 	respectSilentMode->SetEnabledPtr(&g_Config.bEnableSound);
+#endif
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
 	CheckBox *mixWithOthers = audioSettings->Add(new CheckBox(&g_Config.bAudioMixWithOthers, a->T("Mix audio with other apps")));
 	mixWithOthers->OnClick.Add([=](EventParams &e) {
 		System_Notify(SystemNotification::AUDIO_MODE_CHANGED);
@@ -1390,6 +1389,7 @@ void GameSettingsScreen::CreateSystemSettings(UI::ViewGroup *systemSettings) {
 	systemSettings->Add(new ItemHeader(sa->T("Save states")));  // Borrow this string from the savedata manager
 
 	systemSettings->Add(new CheckBox(&g_Config.bEnableStateUndo, sy->T("Savestate slot backups")));
+	systemSettings->Add(new CheckBox(&g_Config.bConfirmLoadState, sy->T("Ask to confirm on load")));
 
 	PopupSliderChoice* savestateSlotCount = systemSettings->Add(new PopupSliderChoice(&g_Config.iSaveStateSlotCount, 1, 30, 5, sy->T("Savestate slot count"), screenManager()));
 	savestateSlotCount->OnChange.Add([](UI::EventParams &e) {

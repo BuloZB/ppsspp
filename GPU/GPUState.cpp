@@ -358,11 +358,12 @@ void GPUStateCache::DoState(PointerWrap &p) {
 		Do(p, savedContextVersion);
 	}
 
-	if (p.GetMode() == PointerWrap::MODE_READ)
+	if (p.GetMode() == PointerWrap::MODE_READ) {
 		gstate_c.Dirty(DIRTY_WORLD_VIEW_PROJ_MATRIX | DIRTY_VIEW_PROJ_MATRIX);
+	}
 }
 
-static const char *const g_gpuUseFlagNames[32] = {
+static constexpr const char * g_gpuUseFlagNames[32] = {
 	"GPU_USE_DUALSOURCE_BLEND",
 	"GPU_USE_LIGHT_UBERSHADER",
 	"GPU_USE_FRAGMENT_TEST_CACHE",

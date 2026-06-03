@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 
 #include "Common/Data/Convert/ColorConv.h"
 #include "Common/Profiler/Profiler.h"
@@ -29,8 +30,10 @@
 #include "Core/Config.h"
 #include "GPU/GPUCommon.h"
 #include "GPU/Common/DrawEngineCommon.h"
+#include "GPU/GPUStateSIMDUtil.h"
 #include "GPU/Common/SplineCommon.h"
 #include "GPU/Common/DepthRaster.h"
+#include "GPU/Common/ShaderId.h"
 #include "GPU/Common/VertexDecoderCommon.h"
 #include "GPU/Common/SoftwareTransformCommon.h"
 #include "GPU/ge_constants.h"
@@ -146,7 +149,7 @@ void DrawEngineCommon::DispatchSubmitImm(GEPrimitiveType prim, TransformedVertex
 	// Code checks this reg directly, not just the vtype ID.
 	if (!prevThrough) {
 		gstate.vertType |= GE_VTYPE_THROUGH;
-		gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE | DIRTY_RASTER_STATE | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE);
+		gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE | DIRTY_RASTER_STATE | DIRTY_VIEWPORTSCISSOR_STATE);
 	}
 
 	int bytesRead;
@@ -154,12 +157,12 @@ void DrawEngineCommon::DispatchSubmitImm(GEPrimitiveType prim, TransformedVertex
 
 	bool clockwise = !gstate.isCullEnabled() || gstate.getCullMode() == cullMode;
 	VertexDecoder *dec = GetVertexDecoder(vertTypeID);
-	SubmitPrim(&temp[0], nullptr, prim, vertexCount, dec, vertTypeID, clockwise, &bytesRead);
+	SubmitPrim(&temp[0], nullptr, prim, vertexCount, dec, vertTypeID, clockwise, &bytesRead, clipInfoFlags_);
 	Flush();
 
 	if (!prevThrough) {
 		gstate.vertType &= ~GE_VTYPE_THROUGH;
-		gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE | DIRTY_RASTER_STATE | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_CULLRANGE);
+		gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE | DIRTY_RASTER_STATE | DIRTY_VIEWPORTSCISSOR_STATE);
 	}
 }
 
@@ -185,13 +188,16 @@ bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int 
 
 	// Although this may lead to drawing that shouldn't happen, the viewport is more complex on VR.
 	// Let's always say objects are within bounds.
-	if (gstate_c.Use(GPU_USE_VIRTUAL_REALITY))
+	if (gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
 		return true;
+	}
 
 	// Try to skip NormalizeVertices if it's pure positions. No need to bother with a vertex decoder
 	// and a large vertex format.
 	if ((vertType & 0xFFFFFF) == GE_VTYPE_POS_FLOAT && !inds) {
-		memcpy(verts, vdata, sizeof(float) * 3 * vertexCount);
+		// Most games that use bbox use floating point bboxes (Outrun, Tekken 6 etc).
+		// memcpy(verts, vdata, sizeof(float) * 3 * vertexCount);
+		verts = (float *)vdata;
 	} else if ((vertType & 0xFFFFFF) == GE_VTYPE_POS_8BIT && !inds) {
 		const s8 *vtx = (const s8 *)vdata;
 		for (int i = 0; i < vertexCount * 3; i++) {
@@ -304,7 +310,7 @@ bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int 
 		}
 	}
 
-	int countToCheck = gstate.isDepthClampEnabled() ? 6 : 4;
+	int countToCheck = gstate.isDepthClipEnabled() ? 6 : 4;
 #if 0
 	// For debugging, the exclusive check. This should make it obvious where the culling borders are in screen space.
 	for (int i = 0; i < countToCheck; i++) {
@@ -323,289 +329,137 @@ bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int 
 	return true;
 }
 
-// NOTE: This doesn't handle through-mode, indexing, morph, or skinning.
-// TODO: For high vertex counts, we should just take the min/max of all the verts, and test the resulting six cube
-// corners. That way we can cull more draws quite cheaply.
-// We could take the min/max during the regular vertex decode, and just skip the draw call if it's trivially culled.
-// This would help games like Midnight Club (that one does a lot of out-of-bounds drawing) immensely.
-bool DrawEngineCommon::TestBoundingBoxFast(const float *worldViewProj, const void *vdata, int vertexCount, const VertexDecoder *dec, u32 vertType) {
-	SimpleVertex *corners = (SimpleVertex *)(decoded_ + 65536 * 12);
-	float *verts = (float *)(decoded_ + 65536 * 18);
+// This optionally culls collections of points against the four side planes, and always computes the min and max of Z and W.
+//
+// The result of that is then used to determine if we need to drop down to software transform+clip or we can hand
+// off to hardware, with whatever capabilities are available.
+//
+// NOTE: This doesn't handle through-mode or indexing (morph or skinning can be handled if they're implemented in software during decode).
+template<u32 posFmt>
+static bool TestBoundingBoxFast(const float *worldViewProj, const void *vdata, int vertexCount, const VertexDecoder *dec, u8 *decoded, ClipInfoFlags *clipInfoFlags) {
+	Mat4F32 worldViewProjMat(worldViewProj);
+	alignas(16) static const float planesXYData[4] = { 1, -1, 1, -1 };
+	Vec4F32 planesXY = Vec4F32::LoadAligned(planesXYData);
+	Vec4S32 insideMaskXY = Vec4S32::Zero();
+	Vec4S32 insideMaskZ = Vec4S32::Zero();  // Note: This does some duplicate computation. We could avoid it on ARM32 using Vec2S32 but not really worth it.
+	Vec4S32 anyOutsideMaskZ = Vec4S32::Zero();
 
+	// Used to reduce the Z precision. This effectively implements the small offsets where Z can be very slightly outside -1..1.
+	// In reality we should probably affect X and Y too, but meh.
+	alignas(16) static const u32 vertexMaskData[4] = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFF00, 0xFFFFFFFF};
+	Vec4S32 vertexMask = Vec4S32::LoadAligned((const int *)vertexMaskData);
+	const int stride = dec->VertexSize();
+	const int offset = dec->posoff;
+	const s8 *data = (const s8 *)vdata + offset;
+
+	const float vpZScale = gstate.getViewportZScale();
+
+	float minProjZ = FLT_MAX;
+	float maxProjZ = -FLT_MAX;
+
+	for (int i = 0; i < vertexCount; i++, data += stride) {
+		Vec4F32 objPos;
+		switch (posFmt) {
+		case GE_VTYPE_POS_8BIT:
+			objPos = Vec4F32::LoadS8Norm(data);
+			break;
+		case GE_VTYPE_POS_16BIT:
+			objPos = Vec4F32::LoadS16Norm((const s16 *)data);
+			break;
+		default:
+			objPos = Vec4F32::Load((const float *)data);
+			break;
+		}
+		Vec4F32 clipPos = objPos.AsVec3ByMatrix44(worldViewProjMat) & vertexMask;  // Not sure we should do the vertex mask thing.
+		Vec4F32 posW = clipPos.ShuffleWWWW();
+		Vec4F32 posXY = clipPos.ShuffleXXYY();
+		Vec4F32 planeDistXY = posXY * planesXY + posW;
+		insideMaskXY |= planeDistXY.CompareGe(Vec4F32::Zero());
+		Vec4F32 posZ = clipPos.ShuffleZZZZ();  // This means that we compute the Z sides twice. Oh well.
+		Vec4F32 planeDistZ = posZ * planesXY + posW;
+		anyOutsideMaskZ |= planeDistZ.CompareLt(Vec4F32::Zero());
+		insideMaskZ |= planeDistZ.CompareGe(Vec4F32::Zero());
+		const float projZ = vpZScale * clipPos[2] / clipPos[3];
+		if (projZ < minProjZ) {
+			minProjZ = projZ;
+		}
+		if (projZ > maxProjZ) {  // else ruins the minss/maxss optimization.
+			maxProjZ = projZ;
+		}
+	}
+
+	if (!AllCompareBitsSet(insideMaskXY) || !AllCompareBitsSet(insideMaskZ)) {
+		// All vertices were outside one side of the clipping cube. We can skip the draw entirely.
+		return false;
+	}
+
+	const float vpZOffset = gstate.getViewportZCenter();
+	minProjZ += vpZOffset;
+	maxProjZ += vpZOffset;
+
+	ClipInfoFlags flags = ClipInfoFlags::Valid;
+
+	// If the W=-Z plane was intersected, here we can go through the vertices again, and check for X/Y bounds for range culling.
+	// However! We need to find a valid way to do so by "backprojecting" the range culling into clip space, which may be a little tricky.
+	//
+	// If nothing is outside the box, the "inversion" cases (vertices hit the boundary after clipping like Flatout, Sengoku Cannon)
+	// cannot happen, and soft clipping is only needed if the viewport is smaller than the valid Z range.
+	//
+	// Alternatively, we just do a compat flag for the affected games until we can solve this.
+
+	if (needFragmentMinMaxClipping() && (minProjZ < gstate.getDepthRangeMin() || maxProjZ > gstate.getDepthRangeMax())) {
+		if (gstate_c.Use(GPU_USE_CLIP_DISTANCE)) {
+			flags |= ClipInfoFlags::MinMaxZClip;
+		} else {
+			// Implement min/max in the fragment shader.
+			flags |= ClipInfoFlags::MinMaxZDiscard;
+		}
+	}
+
+	if (AnyCompareBitsSet(anyOutsideMaskZ)) {
+		// Some vertices were outside the Z clipping planes. Clip againt Z=-W in software (and do culling, too).
+		// TODO: With a compat flag for Flatout/Sengoku, we'll be able to avoid this in many cases, unless
+		// GPU_USE_CULL_DISTANCE is missing, in which case we need it for culling.
+		flags |= ClipInfoFlags::SoftClipCull;
+	}
+
+	if (needFragmentDepthClamp() && (minProjZ < 0 || maxProjZ > 65535)) {
+		if (gstate_c.Use(GPU_USE_DEPTH_CLAMP)) {
+			flags |= ClipInfoFlags::DepthClamp;
+		} else {
+			flags |= ClipInfoFlags::DepthClampFragment;
+		}
+	}
+
+	*clipInfoFlags = flags;
+	return true;
+}
+
+bool DrawEngineCommon::TestBoundingBoxFast(const float *cullMatrix, const void *vdata, int vertexCount, const VertexDecoder *dec, u32 vertType, ClipInfoFlags *flags) {
 	// Although this may lead to drawing that shouldn't happen, the viewport is more complex on VR.
 	// Let's always say objects are within bounds.
 	if (gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
 		return true;
+	} else if (vertexCount == 0) {
+		return false;
 	}
 
-	// Simple, most common case.
-	int stride = dec->VertexSize();
-	int offset = dec->posoff;
-	int vertStride = 3;
-
-	// TODO: Possibly do the plane tests directly against the source formats instead of converting.
 	switch (vertType & GE_VTYPE_POS_MASK) {
 	case GE_VTYPE_POS_8BIT:
-	{
-#if PPSSPP_ARCH(SSE2)
-		__m128 scaleFactor = _mm_set1_ps(1.0f / 128.0f);
-		for (int i = 0; i < vertexCount; i++) {
-			const s8 *data = (const s8 *)vdata + i * stride + offset;
-			// Load 4 bytes (only first 3 will be used, 4th doesn't matter)
-			int32_t temp;
-			memcpy(&temp, data, sizeof(temp));
-			__m128i bits8 = _mm_cvtsi32_si128(temp);
-			// Unpack 8->16 and 16->32, placing the original bytes in the high byte of each 32-bit lane
-			bits8 = _mm_unpacklo_epi8(bits8, bits8);
-			__m128i bits32 = _mm_unpacklo_epi16(bits8, bits8);
-			// Sign extend with a single shift right by 24
-			bits32 = _mm_srai_epi32(bits32, 24);
-			__m128 pos = _mm_mul_ps(_mm_cvtepi32_ps(bits32), scaleFactor);
-			_mm_storeu_ps(verts + i * 3, pos);
-		}
-#elif PPSSPP_ARCH(ARM_NEON)
-		for (int i = 0; i < vertexCount; i++) {
-			const s8 *data = (const s8 *)vdata + i * stride + offset;
-			// Load 4 bytes (only first 3 will be used, 4th doesn't matter)
-			int32_t temp;
-			memcpy(&temp, data, sizeof(temp));
-			int32x2_t data32x2 = vdup_n_s32(temp);
-			int8x8_t data8 = vreinterpret_s8_s32(data32x2);
-			// Sign extend 8-bit to 16-bit, then to 32-bit
-			int16x8_t data16 = vmovl_s8(data8);
-			int32x4_t data32 = vmovl_s16(vget_low_s16(data16));
-			float32x4_t pos = vcvtq_n_f32_s32(data32, 7);  // >> 7 = division by 128.0f
-			vst1q_f32(verts + i * 3, pos);
-		}
-#else
-		for (int i = 0; i < vertexCount; i++) {
-			const s8 *data = (const s8 *)vdata + i * stride + offset;
-			for (int j = 0; j < 3; j++) {
-				verts[i * 3 + j] = data[j] * (1.0f / 128.0f);
-			}
-		}
-#endif
-		break;
-	}
+		return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT>(cullMatrix, vdata, vertexCount, dec, decoded_, flags);
 	case GE_VTYPE_POS_16BIT:
-	{
-#if PPSSPP_ARCH(SSE2)
-		__m128 scaleFactor = _mm_set1_ps(1.0f / 32768.0f);
-		for (int i = 0; i < vertexCount; i++) {
-			const s16 *data = ((const s16 *)((const s8 *)vdata + i * stride + offset));
-			__m128i bits = _mm_loadl_epi64((const __m128i*)data);
-			// Sign extension. Hacky without SSE4.
-			bits = _mm_srai_epi32(_mm_unpacklo_epi16(bits, bits), 16);
-			__m128 pos = _mm_mul_ps(_mm_cvtepi32_ps(bits), scaleFactor);
-			_mm_storeu_ps(verts + i * 3, pos);  // TODO: use stride 4 to avoid clashing writes?
-		}
-#elif PPSSPP_ARCH(ARM_NEON)
-		for (int i = 0; i < vertexCount; i++) {
-			const s16 *dataPtr = ((const s16 *)((const s8 *)vdata + i * stride + offset));
-			int32x4_t data = vmovl_s16(vld1_s16(dataPtr));
-			float32x4_t pos = vcvtq_n_f32_s32(data, 15);  // >> 15 = division by 32768.0f
-			vst1q_f32(verts + i * 3, pos);
-		}
-#else
-		for (int i = 0; i < vertexCount; i++) {
-			const s16 *data = ((const s16 *)((const s8 *)vdata + i * stride + offset));
-			for (int j = 0; j < 3; j++) {
-				verts[i * 3 + j] = data[j] * (1.0f / 32768.0f);
-			}
-		}
-#endif
-		break;
-	}
+		return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT>(cullMatrix, vdata, vertexCount, dec, decoded_, flags);
 	case GE_VTYPE_POS_FLOAT:
-		// No need to copy in this case, we can just read directly from the source format with a stride.
-		verts = (float *)((uint8_t *)vdata + offset);
-		vertStride = stride / 4;
-		break;
+		return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT>(cullMatrix, vdata, vertexCount, dec, decoded_, flags);
+	default:
+		// Shouldn't end up here with the checks outside this function.
+		_dbg_assert_(false);
+		return true;
 	}
-
-	// Modify the transform matrix to take the viewport into account before culling. This is not necessary
-	// for most games, but there are games that rely on outside-viewport draws (such as Dante's Inferno)'s post
-	// processing effects, and we don't want to cull those.
-	// Potentially we should cache this transform matrix too, but hopefully this is not a bottleneck.
-	// I guess we could also do this directly when computing worldviewproj...
-
-	const float vpXCenter = gstate.getViewportXCenter();
-	const float vpYCenter = gstate.getViewportYCenter();
-	const float vpXScale = gstate.getViewportXScale();
-	const float vpYScale = gstate.getViewportYScale();
-	const int scissorX2 = gstate.getScissorX2();
-	const int scissorY2 = gstate.getScissorY2();
-
-	// Check for weird scaling that can make graphics extend beyond the viewport.
-	// NOTE: These checks are not bullet proof.
-	float mtx[16];
-	if (vpXCenter != 2048.0f || vpYCenter != 2048.0f || vpXScale < ((scissorX2 + 1) >> 1) && vpYScale < ((scissorY2 + 1) >> 1)) {
-		// Note that the PSP does not clip against the viewport.
-		const Vec2f baseOffset = Vec2f(gstate.getOffsetX(), gstate.getOffsetY());
-		// Region1 (rate) is used as an X1/Y1 here, matching PSP behavior.
-		Vec2f minOffset = baseOffset + Vec2f(std::max(gstate.getRegionX1(), gstate.getScissorX1()), std::max(gstate.getRegionY1(), gstate.getScissorY1()));
-		Vec2f maxOffset = baseOffset + Vec2f(std::min(gstate.getRegionX2(), gstate.getScissorX2()), std::min(gstate.getRegionY2(), gstate.getScissorY2()));
-
-		// Now let's apply the viewport to our scissor/region + offset range.
-		Vec2f inverseViewportScale = Vec2f(1.0f / gstate.getViewportXScale(), 1.0f / gstate.getViewportYScale());
-		Vec2f minViewport = (minOffset - Vec2f(gstate.getViewportXCenter(), gstate.getViewportYCenter())) * inverseViewportScale;
-		Vec2f maxViewport = (maxOffset - Vec2f(gstate.getViewportXCenter(), gstate.getViewportYCenter())) * inverseViewportScale;
-
-		Vec2f viewportInvSize = Vec2f(1.0f / (maxViewport.x - minViewport.x), 1.0f / (maxViewport.y - minViewport.y));
-
-		Lin::Matrix4x4 applyViewport{};
-		// Scale to the viewport's size.
-		applyViewport.xx = 2.0f * viewportInvSize.x;
-		applyViewport.yy = 2.0f * viewportInvSize.y;
-		applyViewport.zz = 1.0f;
-		applyViewport.ww = 1.0f;
-		// And offset to the viewport's centers.
-		applyViewport.wx = -(maxViewport.x + minViewport.x) * viewportInvSize.x;
-		applyViewport.wy = -(maxViewport.y + minViewport.y) * viewportInvSize.y;
-
-		// TODO: Optimize.
-		Matrix4ByMatrix4(mtx, worldViewProj, applyViewport.m);
-	}
-
-	// We only check the 4 sides. Near/far won't likely make a huge difference.
-	// We test one vertex against 4 planes to get some SIMD. Vertices need to be transformed to world space
-	// for testing, don't want to re-do that, so we have to use that "pivot" of the data.
-
-	// Planes are now fixed. Maybe we can use that to optimize.
-	// x<-w x>w
-	// y<-w y>w
-
-	// NOTE: The planes are the columns. We only need the first members.
-	// x > -w -> x + w > 0
-	// x < w -> -x + w > 0
-	// y > -w -> y + w > 0
-	// y < w -> -y + w > 0
-
-#if PPSSPP_ARCH(SSE2)
-
-	alignas(16) static const float sse_planes[8] = { 1, -1, 1, -1 };
-
-	const __m128 worldX = _mm_loadu_ps(worldViewProj);
-	const __m128 worldY = _mm_loadu_ps(worldViewProj + 4);
-	const __m128 worldZ = _mm_loadu_ps(worldViewProj + 8);
-	const __m128 worldW = _mm_loadu_ps(worldViewProj + 12);
-	const __m128 planesXY = _mm_load_ps(sse_planes);
-	__m128 inside = _mm_set1_ps(0.0f);
-	for (int i = 0; i < vertexCount; i++) {
-		const float *pos = verts + i * vertStride;
-		__m128 clippos = _mm_add_ps(
-			_mm_add_ps(
-				_mm_mul_ps(worldX, _mm_set1_ps(pos[0])),
-				_mm_mul_ps(worldY, _mm_set1_ps(pos[1]))
-			),
-			_mm_add_ps(
-				_mm_mul_ps(worldZ, _mm_set1_ps(pos[2])),
-				worldW
-			)
-		);
-		// OK, we got the clip space homogenous coordinate.
-		// Check it against the four planes in parallel.
-		// We also later want to extract the Z component and take min/max.
-		__m128 posXY = _mm_shuffle_ps(clippos, clippos, _MM_SHUFFLE(1, 1, 0, 0));
-		__m128 posW = _mm_shuffle_ps(clippos, clippos, _MM_SHUFFLE(3, 3, 3, 3));
-		__m128 planeDist = _mm_add_ps(_mm_mul_ps(posXY, planesXY), posW);
-		inside = _mm_or_ps(inside, _mm_cmpge_ps(planeDist, _mm_setzero_ps()));
-	}
-	// 0xF means that we found at least one vertex inside every one of the planes.
-	// We don't bother with counts, though it wouldn't be hard if we had a use for them.
-	return _mm_movemask_ps(inside) == 0xF;
-#elif PPSSPP_ARCH(ARM_NEON)
-	alignas(16) static const float planesXY[4] = { 1, -1, 1, -1 };
-	const float32x4_t worldX = vld1q_f32(worldViewProj);
-	const float32x4_t worldY = vld1q_f32(worldViewProj + 4);
-	const float32x4_t worldZ = vld1q_f32(worldViewProj + 8);
-	const float32x4_t worldW = vld1q_f32(worldViewProj + 12);
-	const float32x4_t planesMul = vld1q_f32(planesXY);
-	uint32x4_t inside = vdupq_n_u32(0);
-	for (int i = 0; i < vertexCount; i++) {
-		const float *pos = verts + i * vertStride;
-		float32x4_t clippos = vmlaq_n_f32(
-			vmlaq_n_f32(
-				vmlaq_n_f32(worldW, worldX, pos[0]),
-				worldY, pos[1]
-			),
-			worldZ, pos[2]
-		);
-		// OK, we got the clip space homogenous coordinate.
-		// Check it against the four planes in parallel.
-		// Build [x, x, y, y] using vdup_lane
-		float32x2_t xy = vget_low_f32(clippos);
-		float32x4_t posXY = vcombine_f32(vdup_lane_f32(xy, 0), vdup_lane_f32(xy, 1));  // [x, x, y, y]
-		float32x4_t posW = vdupq_laneq_f32(clippos, 3);  // [w, w, w, w]
-		float32x4_t planeDist = vmlaq_f32(posW, posXY, planesMul);
-		inside = vorrq_u32(inside, vcgeq_f32(planeDist, vdupq_n_f32(0.0f)));
-	}
-	uint64_t insideBits = vget_lane_u64(vreinterpret_u64_u16(vmovn_u32(inside)), 0);
-	return ~insideBits == 0;
-#elif 0 && PPSSPP_ARCH(LOONGARCH64_LSX)
-	// NOTE: Untested
-	alignas(16) static const float planesXY[4] = { 1, -1, 1, -1 };
-	const __m128 worldX = (__m128)__lsx_vld(worldViewProj, 0);
-	const __m128 worldY = (__m128)__lsx_vld(worldViewProj + 4, 0);
-	const __m128 worldZ = (__m128)__lsx_vld(worldViewProj + 8, 0);
-	const __m128 worldW = (__m128)__lsx_vld(worldViewProj + 12, 0);
-	const __m128 planesMul = (__m128)__lsx_vld(planesXY, 0);
-	__m128 inside = (__m128)__lsx_vreplfr2vr_s(0.0f);
-	for (int i = 0; i < vertexCount; i++) {
-		const float *pos = verts + i * vertStride;
-		// clippos = worldX * pos[0] + worldY * pos[1] + worldZ * pos[2] + worldW
-		__m128 clippos = (__m128)__lsx_vfadd_s(
-			(__m128)__lsx_vfadd_s(
-				(__m128)__lsx_vfmul_s(worldX, (__m128)__lsx_vreplfr2vr_s(pos[0])),
-				(__m128)__lsx_vfmul_s(worldY, (__m128)__lsx_vreplfr2vr_s(pos[1]))
-			),
-			(__m128)__lsx_vfadd_s(
-				(__m128)__lsx_vfmul_s(worldZ, (__m128)__lsx_vreplfr2vr_s(pos[2])),
-				worldW
-			)
-		);
-		// OK, we got the clip space homogenous coordinate.
-		// Check it against the four planes in parallel.
-		// Build [x, x, y, y] using __lsx_vshuf4i_w
-		__m128 posXY = (__m128)__lsx_vshuf4i_w(clippos, 0b01010000);  // [x, x, y, y]
-		__m128 posW = (__m128)__lsx_vshuf4i_w(clippos, 0b11111111);   // [w, w, w, w]
-		__m128 planeDist = (__m128)__lsx_vfmadd_s(planesMul, posXY, posW);
-		inside = (__m128)__lsx_vor_v(inside, (__m128)__lsx_vfcmp_cle_s((__m128)__lsx_vreplfr2vr_s(0.0f), planeDist));
-	}
-	// Check if all 4 lanes are set
-	__m128i mask = (__m128i)__lsx_vseqi_w((__m128i)inside, 0);
-	return __lsx_bz_v(mask);
-#else
-	int inside[4]{};
-	for (int i = 0; i < vertexCount; i++) {
-		const float *pos = verts + i * vertStride;
-		float clippos[4];
-		Vec3ByMatrix44(clippos, pos, gstate_c.worldviewproj);
-		if (clippos[0] > -clippos[3]) { //  x > -w
-			inside[0]++;
-		}
-		if (clippos[0] < clippos[3]) {  //  x < w
-			inside[1]++;
-		}
-		if (clippos[1] > -clippos[3]) { //  y > -w
-			inside[2]++;
-		}
-		if (clippos[1] < clippos[3]) {  //  y < w
-			inside[3]++;
-		}
-	}
-
-	for (int plane = 0; plane < 4; plane++) {
-		if (inside[plane] == 0) {
-			return false;
-		}
-	}
-#endif
-	return true;
 }
 
 // 2D bounding box test against scissor. No indexing yet.
-// Only supports non-indexed draws with float positions.
+// Only supports non-indexed draws with float positions. TODO: Add more float formats.
 bool DrawEngineCommon::TestBoundingBoxThrough(const void *vdata, int vertexCount, const VertexDecoder *dec, u32 vertType, int *bytesRead) {
 	// Grab temp buffer space from large offsets in decoded_. Not exactly safe for large draws.
 	if (vertexCount > 16) {
@@ -628,8 +482,8 @@ bool DrawEngineCommon::TestBoundingBoxThrough(const void *vdata, int vertexCount
 	bool allOutsideBottom = true;
 	const float left = gstate.getScissorX1();
 	const float top = gstate.getScissorY1();
-	const float right = gstate.getScissorX2();
-	const float bottom = gstate.getScissorY2();
+	const float right = gstate.getScissorX2() + 1;
+	const float bottom = gstate.getScissorY2() + 1;
 
 	switch (vertType & GE_VTYPE_POS_MASK) {
 	case GE_VTYPE_POS_FLOAT:
@@ -642,13 +496,13 @@ bool DrawEngineCommon::TestBoundingBoxThrough(const void *vdata, int vertexCount
 			if (x >= left) {
 				allOutsideLeft = false;
 			}
-			if (x <= right + 1) {
+			if (x <= right) {
 				allOutsideRight = false;
 			}
 			if (y >= top) {
 				allOutsideTop = false;
 			}
-			if (y <= bottom + 1) {
+			if (y <= bottom) {
 				allOutsideBottom = false;
 			}
 		}
@@ -664,11 +518,75 @@ bool DrawEngineCommon::TestBoundingBoxThrough(const void *vdata, int vertexCount
 	}
 }
 
+bool DrawEngineCommon::EstimateThroughPrimSafeSize(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, u32 vertType, int *safeWidth, int *safeHeight) {
+	if (prim != GE_PRIM_RECTANGLES && prim != GE_PRIM_TRIANGLES) {
+		return false;
+	}
+	if ((vertType & GE_VTYPE_THROUGH_MASK) == 0 || (vertType & (GE_VTYPE_WEIGHT_MASK | GE_VTYPE_MORPHCOUNT_MASK)) != 0) {
+		return false;
+	}
+
+	const int stride = dec->VertexSize();
+	const int posOffset = dec->posoff;
+	IndexConverter conv(vertType, inds);
+
+	float minX = FLT_MAX;
+	float minY = FLT_MAX;
+	float maxX = -FLT_MAX;
+	float maxY = -FLT_MAX;
+
+	for (int i = 0; i < vertexCount; ++i) {
+		const u8 *posPtr = (const u8 *)verts + conv(i) * stride + posOffset;
+		float x;
+		float y;
+
+		switch (vertType & GE_VTYPE_POS_MASK) {
+		case GE_VTYPE_POS_8BIT:
+			x = 0.0f;
+			y = 0.0f;
+			break;
+		case GE_VTYPE_POS_16BIT:
+		{
+			const s16_le *pos = (const s16_le *)posPtr;
+			x = (float)pos[0];
+			y = (float)pos[1];
+			break;
+		}
+		case GE_VTYPE_POS_FLOAT:
+		{
+			const float_le *pos = (const float_le *)posPtr;
+			x = pos[0];
+			y = pos[1];
+			break;
+		}
+		default:
+			return false;
+		}
+
+		minX = std::min(minX, x);
+		minY = std::min(minY, y);
+		maxX = std::max(maxX, x);
+		maxY = std::max(maxY, y);
+	}
+
+	const int scissorX1 = gstate.getScissorX1();
+	const int scissorY1 = gstate.getScissorY1();
+	const int scissorX2 = gstate.getScissorX2() + 1;
+	const int scissorY2 = gstate.getScissorY2() + 1;
+	if (maxX <= scissorX1 || maxY <= scissorY1 || minX >= scissorX2 || minY >= scissorY2) {
+		return false;
+	}
+
+	*safeWidth = std::clamp((int)ceilf(maxX), 0, scissorX2);
+	*safeHeight = std::clamp((int)ceilf(maxY), 0, scissorY2);
+	return *safeWidth > 0 && *safeHeight > 0;
+}
+
 void DrawEngineCommon::ApplyFramebufferRead(FBOTexState *fboTexState) {
 	if (gstate_c.Use(GPU_USE_FRAMEBUFFER_FETCH)) {
 		*fboTexState = FBO_TEX_READ_FRAMEBUFFER;
 	} else {
-		gpuStats.numCopiesForShaderBlend++;
+		gpuStats.perFrame.numCopiesForShaderBlend++;
 		*fboTexState = FBO_TEX_COPY_BIND_TEX;
 	}
 	gstate_c.Dirty(DIRTY_SHADERBLEND);
@@ -682,9 +600,16 @@ int DrawEngineCommon::ComputeNumVertsToDecode() const {
 	return sum;
 }
 
+
+
 // Takes a list of consecutive PRIM opcodes, and extends the current draw call to include them.
-// This is just a performance optimization.
-int DrawEngineCommon::ExtendNonIndexedPrim(const uint32_t *cmd, const uint32_t *stall, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, bool isTriangle) {
+// This is just a performance optimization. NOTE: This isn't compatible with really accurate culling,
+// unless we refactor things a bit.
+int DrawEngineCommon::ExtendNonIndexedPrim(const uint32_t *cmd, const uint32_t *stall, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, bool isTriangle, ClipInfoFlags clipInfoFlags) {
+	if (clipInfoFlags & ClipInfoFlags::Valid) {
+		clipInfoFlags_ |= clipInfoFlags;
+	}
+
 	const uint32_t *start = cmd;
 	int prevDrawVerts = numDrawVerts_ - 1;
 	DeferredVerts &dv = drawVerts_[prevDrawVerts];
@@ -732,7 +657,7 @@ int DrawEngineCommon::ExtendNonIndexedPrim(const uint32_t *cmd, const uint32_t *
 	return cmd - start;
 }
 
-void DrawEngineCommon::SkipPrim(GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, u32 vertTypeID, int *bytesRead) {
+void DrawEngineCommon::SkipPrim(GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, int *bytesRead) {
 	if (!indexGen.PrimCompatible(prevPrim_, prim)) {
 		Flush();
 	}
@@ -752,10 +677,18 @@ void DrawEngineCommon::SkipPrim(GEPrimitiveType prim, int vertexCount, const Ver
 }
 
 // vertTypeID is the vertex type but with the UVGen mode smashed into the top bits.
-bool DrawEngineCommon::SubmitPrim(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead) {
+bool DrawEngineCommon::SubmitPrim(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, ClipInfoFlags clipInfoFlags) {
 	if (!indexGen.PrimCompatible(prevPrim_, prim) || numDrawVerts_ >= MAX_DEFERRED_DRAW_VERTS || numDrawInds_ >= MAX_DEFERRED_DRAW_INDS || vertexCountInDrawCalls_ + vertexCount > VERTEX_BUFFER_MAX) {
 		Flush();
 	}
+
+	if (clipInfoFlags & ClipInfoFlags::Valid) {
+		if (clipInfoFlags_ != clipInfoFlags) {
+			Flush();
+		}
+		clipInfoFlags_ = clipInfoFlags;
+	}
+
 	_dbg_assert_(numDrawVerts_ < MAX_DEFERRED_DRAW_VERTS);
 	_dbg_assert_(numDrawInds_ < MAX_DEFERRED_DRAW_INDS);
 
@@ -1134,7 +1067,7 @@ void DrawEngineCommon::DepthRasterSubmitRaw(GEPrimitiveType prim, const VertexDe
 		return;
 	}
 
-	TimeCollector collectStat(&gpuStats.msPrepareDepth, coreCollectDebugStats);
+	TimeCollector collectStat(&gpuStats.perFrame.msPrepareDepth, coreCollectDebugStats);
 
 	// Decode.
 	int numDecoded = 0;
@@ -1176,7 +1109,7 @@ void DrawEngineCommon::DepthRasterPredecoded(GEPrimitiveType prim, const void *i
 		return;
 	}
 
-	TimeCollector collectStat(&gpuStats.msPrepareDepth, coreCollectDebugStats);
+	TimeCollector collectStat(&gpuStats.perFrame.msPrepareDepth, coreCollectDebugStats);
 
 	// Make sure these have already been indexed away.
 	_dbg_assert_(prim != GE_PRIM_TRIANGLE_STRIP && prim != GE_PRIM_TRIANGLE_FAN);
@@ -1209,7 +1142,7 @@ void DrawEngineCommon::DepthRasterPredecoded(GEPrimitiveType prim, const void *i
 
 void DrawEngineCommon::FlushQueuedDepth() {
 	if (rasterTimeStart_ != 0.0) {
-		gpuStats.msRasterTimeAvailable += time_now_d() - rasterTimeStart_;
+		gpuStats.perFrame.msRasterTimeAvailable += time_now_d() - rasterTimeStart_;
 		rasterTimeStart_ = 0.0;
 	}
 
@@ -1228,7 +1161,7 @@ void DrawEngineCommon::FlushQueuedDepth() {
 		DepthScissor tileScissor = draw.scissor.Tile(0, 1);
 
 		{
-			TimeCollector collectStat(&gpuStats.msCullDepth, collectStats);
+			TimeCollector collectStat(&gpuStats.perFrame.msCullDepth, collectStats);
 			switch (draw.prim) {
 			case GE_PRIM_RECTANGLES:
 				outVertCount = DepthRasterClipIndexedRectangles(tx, ty, tz, vertices, indices, draw, tileScissor);
@@ -1242,7 +1175,7 @@ void DrawEngineCommon::FlushQueuedDepth() {
 			}
 		}
 		if (outVertCount > 0) {
-			TimeCollector collectStat(&gpuStats.msRasterizeDepth, collectStats);
+			TimeCollector collectStat(&gpuStats.perFrame.msRasterizeDepth, collectStats);
 			if (!Memory::IsValid4AlignedAddress(draw.depthAddr)) {
 				continue;
 			}

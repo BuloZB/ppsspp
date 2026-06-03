@@ -284,14 +284,13 @@ public:
 
 	bool bSoftwareRendering;
 	bool bSoftwareRenderingJit;
-	bool bHardwareTransform; // only used in the GLES backend
+	bool bHardwareTransform;
 	bool bSoftwareSkinning;
 	bool bVendorBugChecksEnabled;
 	bool bUseGeometryShader;
 
 	// Speedhacks (more will be moved here):
 	bool bSkipBufferEffects;
-	bool bDisableRangeCulling;
 	int iDepthRasterMode;
 
 	int iTexFiltering; // 1 = auto , 2 = nearest , 3 = linear , 4 = auto max quality
@@ -346,6 +345,7 @@ public:
 	int iRewindSnapshotInterval;
 	bool bUISound;
 	bool bEnableStateUndo;
+	bool bConfirmLoadState;
 	std::string sStateLoadUndoGame;
 	std::string sStateUndoLastSaveGame;
 	int iStateUndoLastSaveSlot;

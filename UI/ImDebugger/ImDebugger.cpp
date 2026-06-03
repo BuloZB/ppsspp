@@ -7,7 +7,7 @@
 #include "Common/StringUtils.h"
 #include "Common/File/FileUtil.h"
 #include "Common/Data/Format/IniFile.h"
-#include "Common/Data/Text/Parsers.h"
+#include "Common/Data/Text/StringWriter.h"
 #include "Common/Log/LogManager.h"
 #include "Common/TimeUtil.h"
 #include "Core/Config.h"
@@ -59,7 +59,7 @@
 #include "Core/MIPS/MIPSStackWalk.h"
 
 // GPU things
-#include "GPU/Common/GPUDebugInterface.h"
+#include "GPU/GPUCommon.h"
 #include "GPU/Debugger/Stepping.h"
 
 #include "UI/ImDebugger/ImDebugger.h"
@@ -2273,7 +2273,7 @@ void DrawHLEModules(ImConfig &config) {
 							break;
 						}
 					}
-					w.F("%s 0x%08x %d %s", func.name, func.ID, strlen(func.argmask), amask.c_str()).endl();
+					w.F("%s 0x%08x %d %s", func.name, func.ID, (int)strlen(func.argmask), amask.c_str()).endl();
 				}
 				System_CopyStringToClipboard(w.as_view());
 				delete[] buffer;
@@ -2312,7 +2312,7 @@ ImDebugger::~ImDebugger() {
 	cfg_.SaveConfig(ConfigPath());
 }
 
-void ImDebugger::Frame(MIPSDebugInterface *mipsDebug, GPUDebugInterface *gpuDebug, Draw::DrawContext *draw) {
+void ImDebugger::Frame(MIPSDebugInterface *mipsDebug, GPUCommon *gpuDebug, Draw::DrawContext *draw) {
 	// Snapshot the coreState to avoid inconsistency.
 	const CoreState coreState = ::coreState;
 
@@ -2766,7 +2766,7 @@ void ImDebugger::Snapshot(MIPSState *mips) {
 	pixelViewer_.Snapshot();
 }
 
-void ImDebugger::SnapshotGPU(GPUDebugInterface *gpuDebug) {
+void ImDebugger::SnapshotGPU(GPUCommon *gpuDebug) {
 	pixelViewer_.Snapshot();
 }
 
