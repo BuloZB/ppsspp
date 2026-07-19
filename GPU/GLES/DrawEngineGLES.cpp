@@ -53,19 +53,13 @@ enum {
 DrawEngineGLES::DrawEngineGLES(Draw::DrawContext *draw) : inputLayoutMap_(16), draw_(draw) {
 	render_ = (GLRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
 
-	decOptions_.expandAllWeightsToFloat = false;
 	decOptions_.expand8BitNormalsToFloat = false;
 
 	InitDeviceObjects();
-
-	tessDataTransferGLES = new TessellationDataTransferGLES(render_);
-	tessDataTransfer = tessDataTransferGLES;
 }
 
 DrawEngineGLES::~DrawEngineGLES() {
 	DestroyDeviceObjects();
-
-	delete tessDataTransferGLES;
 }
 
 void DrawEngineGLES::DeviceLost() {
@@ -147,7 +141,6 @@ void DrawEngineGLES::EndFrame() {
 	FrameData &frameData = frameData_[render_->GetCurFrame()];
 	frameData.pushIndex->End();
 	frameData.pushVertex->End();
-	tessDataTransferGLES->EndFrame();
 }
 
 struct GlTypeInfo {
@@ -241,16 +234,6 @@ void DrawEngineGLES::Flush() {
 		return;
 	}
 
-	bool textureNeedsApply = false;
-	if (gstate_c.IsDirty(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS) && !gstate.isModeClear() && gstate.isTextureMapEnabled()) {
-		textureCache_->SetTexture();
-		gstate_c.Clean(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS);
-		textureNeedsApply = true;
-	} else if (gstate.getTextureAddress(0) == (gstate.getFrameBufRawAddress() | 0x04000000)) {
-		// This catches the case of clearing a texture. (#10957)
-		gstate_c.Dirty(DIRTY_TEXTURE_IMAGE);
-	}
-
 	GEPrimitiveType prim = prevPrim_;
 
 	bool useHWTransform = CanUseHardwareTransform(prim);
@@ -264,6 +247,9 @@ void DrawEngineGLES::Flush() {
 		if (changed & (ClipInfoFlags::DepthClampFragment | ClipInfoFlags::MinMaxZDiscard)) {
 			gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE | DIRTY_RASTER_STATE);
 		}
+		if (changed & ClipInfoFlags::FlatZ) {
+			gstate_c.Dirty(DIRTY_TEXTURE_PARAMS);
+		}
 		lastClipInfoFlags_ = clipInfoFlags_;
 	}
 
@@ -272,7 +258,7 @@ void DrawEngineGLES::Flush() {
 		lastUseHwTransform_ = useHWTransform;
 	}
 
-	Shader *vshader = shaderManager_->ApplyVertexShader(useHWTransform, useHWTessellation_, dec_->VertexType(), decOptions_.expandAllWeightsToFloat, applySkinInDecode_ || !useHWTransform, clipInfoFlags_, &vsid);
+	Shader *vshader = shaderManager_->ApplyVertexShader(useHWTransform, dec_->VertexType(), clipInfoFlags_, &vsid);
 
 	useHWTransform = vshader->UseHWTransform();  // In case shader compilation failed and it fell back. However, this can no longer really happen... Need to fix this.
 
@@ -282,7 +268,7 @@ void DrawEngineGLES::Flush() {
 	uint32_t indexBufferOffset = 0;
 
 	if (useHWTransform) {
-		if (applySkinInDecode_ && (lastVType_ & GE_VTYPE_WEIGHT_MASK)) {
+		if (lastVType_ & GE_VTYPE_WEIGHT_MASK) {
 			// If software skinning, we're predecoding into "decoded". So make sure we're done, then push that content.
 			DecodeVerts(dec_, decoded_);
 			uint32_t size = numDecodedVerts_ * dec_->GetDecVtxFmt().stride;
@@ -300,6 +286,7 @@ void DrawEngineGLES::Flush() {
 		bool useElements;
 		DecodeVerts(dec_, decoded_);
 		DecodeIndsAndGetData(&prim, &vertexCount, &maxIndex, &useElements, false);
+		gpuStats.perFrame.numVertsDrawn += vertexCount;
 
 		if (useElements) {
 			uint32_t esz = sizeof(uint16_t) * vertexCount;
@@ -316,15 +303,20 @@ void DrawEngineGLES::Flush() {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && ((hasColor && (gstate.materialupdate & 1)) || gstate.getMaterialAmbientA() == 255) && (!gstate.isLightingEnabled() || gstate.getAmbientA() == 255);
 		}
 
-		if (textureNeedsApply) {
-			textureCache_->ApplyTexture();
+		if (gstate_c.IsDirty(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS) && !gstate.isModeClear() && gstate.isTextureMapEnabled()) {
+			TextureApplyResult textureResult = textureCache_->ApplyTexture(true);
+			textureCache_->ApplySampler(textureResult, clipInfoFlags_ & ClipInfoFlags::FlatZ, false);
+			gstate_c.Clean(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS);
+		} else if (gstate.getTextureAddress(0) == (gstate.getFrameBufRawAddress() | 0x04000000)) {
+			// This catches the case of clearing a texture. (#10957)
+			gstate_c.Dirty(DIRTY_TEXTURE_IMAGE);
 		}
 
 		// Need to ApplyDrawState after ApplyTexture because depal can launch a render pass and that wrecks the state.
 		ApplyDrawState(prim);
 		ApplyDrawStateLate(false, 0);
 		
-		LinkedShader *program = shaderManager_->ApplyFragmentShader(vsid, vshader, pipelineState_, clipInfoFlags_);
+		LinkedShader *program = shaderManager_->ApplyFragmentShader(vsid, vshader, pipelineState_, clipInfoFlags_, false);
 		GLRInputLayout *inputLayout = SetupDecFmtForDraw(dec_->GetDecVtxFmt());
 		if (useElements) {
 			render_->DrawIndexed(inputLayout,
@@ -341,14 +333,7 @@ void DrawEngineGLES::Flush() {
 		}
 	} else {
 		PROFILE_THIS_SCOPE("soft");
-		const VertexDecoder *swDec = dec_;
-		if (swDec->nweights != 0) {
-			u32 withSkinning = lastVType_ | (1 << 26);
-			if (withSkinning != lastVType_) {
-				swDec = GetVertexDecoder(withSkinning);
-			}
-		}
-		DecodeVerts(swDec, decoded_);
+		DecodeVerts(dec_, decoded_);
 		int vertexCount = DecodeInds();
 
 		bool hasColor = (lastVType_ & GE_VTYPE_COL_MASK) != GE_VTYPE_COL_NONE;
@@ -358,7 +343,6 @@ void DrawEngineGLES::Flush() {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && ((hasColor && (gstate.materialupdate & 1)) || gstate.getMaterialAmbientA() == 255) && (!gstate.isLightingEnabled() || gstate.getAmbientA() == 255);
 		}
 
-		gpuStats.perFrame.numUncachedVertsDrawn += vertexCount;
 		prim = IndexGenerator::GeneralPrim((GEPrimitiveType)drawInds_[0].prim);
 
 		int maxIndex = numDecodedVerts_;
@@ -376,7 +360,19 @@ void DrawEngineGLES::Flush() {
 		// We could piggyback on the viewport transform below, but it gets complicated since it's different per-backend. Which we really
 		// should clean up one day...
 		if (useDepthRaster_) {
-			DepthRasterPredecoded(prim, decoded_, numDecodedVerts_, swDec, vertexCount);
+			DepthRasterPredecoded(prim, decoded_, numDecodedVerts_, dec_, vertexCount);
+		}
+
+		bool textureNeedsApply = false;
+		TextureApplyResult textureResult;
+		if (gstate_c.IsDirty(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS) && !gstate.isModeClear() && gstate.isTextureMapEnabled()) {
+			gstate_c.Clean(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS);
+			gstate_c.dstSquared = false;
+			textureResult = textureCache_->ApplyTexture(true);
+			textureNeedsApply = true;
+		} else if (gstate.getTextureAddress(0) == (gstate.getFrameBufRawAddress() | 0x04000000)) {
+			// This catches the case of clearing a texture. (#10957)
+			gstate_c.Dirty(DIRTY_TEXTURE_IMAGE);
 		}
 
 		u16 *inds = decIndex_;
@@ -388,27 +384,21 @@ void DrawEngineGLES::Flush() {
 		params.transformedExpanded = transformedExpanded_;
 		params.allowClear = true;  // Clear in OpenGL respects scissor rects, so we'll use it.
 		params.allowSeparateAlphaClear = true;
+		params.clipInfoFlags = clipInfoFlags_;
 
-		const SoftwareTransformAction action = RunSoftwareTransform(params, prim, swDec->VertexType(), swDec->GetDecVtxFmt(), numDecodedVerts_, VERTEX_BUFFER_MAX, vertexCount, inds, RemainingIndices(inds), &result);
-
-		if (result.setSafeSize)
-			framebufferManager_->SetSafeSize(result.safeWidth, result.safeHeight);
-
+		const SoftwareTransformAction action = RunSoftwareTransform(params, prim, dec_->VertexType(), dec_->GetDecVtxFmt(), numDecodedVerts_, VERTEX_BUFFER_MAX, vertexCount, inds, RemainingIndices(inds), &result);
 		if (textureNeedsApply) {
-			gstate_c.pixelMapped = result.pixelMapped;
-			gstate_c.dstSquared = false;
-			textureCache_->ApplyTexture();
+			textureCache_->ApplySampler(textureResult, clipInfoFlags_ & ClipInfoFlags::FlatZ, result.pixelMapped);
 			if (gstate_c.dstSquared) {
 				gstate_c.Dirty(DIRTY_BLEND_STATE);
 			}
-			gstate_c.pixelMapped = false;
 		}
 
 		// Need to ApplyDrawState after ApplyTexture because depal can launch a render pass and that wrecks the state.
 		ApplyDrawState(prim);
 		ApplyDrawStateLate(result.setStencil, result.stencilValue);
 
-		LinkedShader *linked = shaderManager_->ApplyFragmentShader(vsid, vshader, pipelineState_, clipInfoFlags_);
+		LinkedShader *linked = shaderManager_->ApplyFragmentShader(vsid, vshader, pipelineState_, clipInfoFlags_, result.pixelMapped);
 		if (!linked) {
 			// Not much we can do here. Let's skip drawing.
 			goto bail;
@@ -420,6 +410,7 @@ void DrawEngineGLES::Flush() {
 			render_->DrawIndexed(
 				softwareInputLayout_, vertexBuffer, vertexBufferOffset, indexBuffer, indexBufferOffset,
 				glprim[prim], result.drawIndexCount, GL_UNSIGNED_SHORT);
+			gpuStats.perFrame.numVertsDrawn += result.drawIndexCount;
 		} else if (action == SW_CLEAR) {
 			u32 clearColor = result.color;
 			float clearDepth = result.depth;
@@ -452,81 +443,4 @@ bail:
 	ResetAfterDrawInline();
 	framebufferManager_->SetColorUpdated(gstate_c.skipDrawReason);
 	gpuCommon_->NotifyFlush();
-}
-
-// TODO: Refactor this to a single USE flag.
-bool DrawEngineGLES::SupportsHWTessellation() {
-	bool hasTexelFetch = gl_extensions.GLES3 || (!gl_extensions.IsGLES && gl_extensions.VersionGEThan(3, 3, 0)) || gl_extensions.EXT_gpu_shader4;
-	return hasTexelFetch && gstate_c.UseAll(GPU_USE_VERTEX_TEXTURE_FETCH | GPU_USE_TEXTURE_FLOAT | GPU_USE_INSTANCE_RENDERING);
-}
-
-bool DrawEngineGLES::UpdateUseHWTessellation(bool enable) const {
-	return enable && SupportsHWTessellation();
-}
-
-void TessellationDataTransferGLES::SendDataToShader(const SimpleVertex *const *points, int size_u, int size_v, u32 vertType, const Spline::Weight2D &weights) {
-	bool hasColor = (vertType & GE_VTYPE_COL_MASK) != 0;
-	bool hasTexCoord = (vertType & GE_VTYPE_TC_MASK) != 0;
-
-	int size = size_u * size_v;
-	float *pos = new float[size * 4];
-	float *tex = hasTexCoord ? new float[size * 4] : nullptr;
-	float *col = hasColor ? new float[size * 4] : nullptr;
-	int stride = 4;
-
-	CopyControlPoints(pos, tex, col, stride, stride, stride, points, size, vertType);
-	// Removed the 1D texture support, it's unlikely to be relevant for performance.
-	// Control Points
-	if (prevSizeU < size_u || prevSizeV < size_v) {
-		prevSizeU = size_u;
-		prevSizeV = size_v;
-		if (data_tex[0])
-			renderManager_->DeleteTexture(data_tex[0]);
-		data_tex[0] = renderManager_->CreateTexture(GL_TEXTURE_2D, size_u * 3, size_v, 1, 1);
-		renderManager_->TextureImage(data_tex[0], 0, size_u * 3, size_v, 1, Draw::DataFormat::R32G32B32A32_FLOAT, nullptr, GLRAllocType::NONE, false);
-		renderManager_->FinalizeTexture(data_tex[0], 0, false);
-	}
-	renderManager_->BindTexture(TEX_SLOT_SPLINE_POINTS, data_tex[0]);
-	// Position
-	renderManager_->TextureSubImage(TEX_SLOT_SPLINE_POINTS, data_tex[0], 0, 0, 0, size_u, size_v, Draw::DataFormat::R32G32B32A32_FLOAT, (u8 *)pos, GLRAllocType::NEW);
-	// Texcoord
-	if (hasTexCoord)
-		renderManager_->TextureSubImage(TEX_SLOT_SPLINE_POINTS, data_tex[0], 0, size_u, 0, size_u, size_v, Draw::DataFormat::R32G32B32A32_FLOAT, (u8 *)tex, GLRAllocType::NEW);
-	// Color
-	if (hasColor)
-		renderManager_->TextureSubImage(TEX_SLOT_SPLINE_POINTS, data_tex[0], 0, size_u * 2, 0, size_u, size_v, Draw::DataFormat::R32G32B32A32_FLOAT, (u8 *)col, GLRAllocType::NEW);
-
-	// Weight U
-	if (prevSizeWU < weights.size_u) {
-		prevSizeWU = weights.size_u;
-		if (data_tex[1])
-			renderManager_->DeleteTexture(data_tex[1]);
-		data_tex[1] = renderManager_->CreateTexture(GL_TEXTURE_2D, weights.size_u * 2, 1, 1, 1);
-		renderManager_->TextureImage(data_tex[1], 0, weights.size_u * 2, 1, 1, Draw::DataFormat::R32G32B32A32_FLOAT, nullptr, GLRAllocType::NONE, false);
-		renderManager_->FinalizeTexture(data_tex[1], 0, false);
-	}
-	renderManager_->BindTexture(TEX_SLOT_SPLINE_WEIGHTS_U, data_tex[1]);
-	renderManager_->TextureSubImage(TEX_SLOT_SPLINE_WEIGHTS_U, data_tex[1], 0, 0, 0, weights.size_u * 2, 1, Draw::DataFormat::R32G32B32A32_FLOAT, (u8 *)weights.u, GLRAllocType::NONE);
-
-	// Weight V
-	if (prevSizeWV < weights.size_v) {
-		prevSizeWV = weights.size_v;
-		if (data_tex[2])
-			renderManager_->DeleteTexture(data_tex[2]);
-		data_tex[2] = renderManager_->CreateTexture(GL_TEXTURE_2D, weights.size_v * 2, 1, 1, 1);
-		renderManager_->TextureImage(data_tex[2], 0, weights.size_v * 2, 1, 1, Draw::DataFormat::R32G32B32A32_FLOAT, nullptr, GLRAllocType::NONE, false);
-		renderManager_->FinalizeTexture(data_tex[2], 0, false);
-	}
-	renderManager_->BindTexture(TEX_SLOT_SPLINE_WEIGHTS_V, data_tex[2]);
-	renderManager_->TextureSubImage(TEX_SLOT_SPLINE_WEIGHTS_V, data_tex[2], 0, 0, 0, weights.size_v * 2, 1, Draw::DataFormat::R32G32B32A32_FLOAT, (u8 *)weights.v, GLRAllocType::NONE);
-}
-
-void TessellationDataTransferGLES::EndFrame() {
-	for (int i = 0; i < 3; i++) {
-		if (data_tex[i]) {
-			renderManager_->DeleteTexture(data_tex[i]);
-			data_tex[i] = nullptr;
-		}
-	}
-	prevSizeU = prevSizeV = prevSizeWU = prevSizeWV = 0;
 }

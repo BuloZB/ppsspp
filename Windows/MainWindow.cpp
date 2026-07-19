@@ -532,8 +532,9 @@ namespace MainWindow {
 		ApplyFullscreenState(hwndMain, g_Config.bFullScreen);
 
 		if (!g_Config.bShowMenuBar) {
-			MainMenuInit(hwndMain, g_hMenu);
 			SetMenu(hwndMain, NULL);
+		} else {
+			MainMenuInit(hwndMain, g_hMenu);
 		}
 
 		// Accept dragged files.
@@ -1101,7 +1102,7 @@ namespace MainWindow {
 			g_InputManager.StopPolling();
 			MainThread_Stop();
 			UpdateUIState(UISTATE_MENU);
-			MainThread_Start(g_Config.iGPUBackend == (int)GPUBackend::OPENGL);
+			MainThread_Start(0, nullptr);
 			g_InputManager.BeginPolling();
 			break;
 

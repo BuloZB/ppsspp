@@ -575,6 +575,7 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 	// Note that if we don't have storage permission here, loading the config will
 	// fail and it will be set to the default. Later, we load again when we get permission.
 	g_Config.Load();
+	System_Notify(SystemNotification::CONFIG_LOADED);
 #endif
 
 	const char *fileToLog = nullptr;
@@ -975,12 +976,14 @@ bool CreateGlobalPipelines() {
 
 	colorPipeline = g_draw->CreateGraphicsPipeline(colorDesc, "global_color");
 	if (!colorPipeline) {
+		_dbg_assert_(false);
 		// Something really critical is wrong, don't care much about correct releasing of the states.
 		return false;
 	}
 
 	texColorPipeline = g_draw->CreateGraphicsPipeline(texColorDesc, "global_texcolor");
 	if (!texColorPipeline) {
+		_dbg_assert_(false);
 		// Something really critical is wrong, don't care much about correct releasing of the states.
 		return false;
 	}
@@ -1367,8 +1370,16 @@ static void ProcessWheelRelease(InputKeyCode keyCode, double now, bool keyPress)
 	}
 }
 
+KeyModifier g_modifiersPressed{};
+
+KeyModifier NativeGetKeyModifiers() {
+	return g_modifiersPressed;
+}
+
 bool NativeKey(const KeyInput &key) {
 	double now = time_now_d();
+
+	System_Notify(SystemNotification::ACTIVITY);
 
 	// VR actions
 	if ((IsVREnabled() || g_Config.bForceVR) && !UpdateVRKeys(key)) {
@@ -1417,18 +1428,137 @@ bool NativeKey(const KeyInput &key) {
 	}
 #endif
 
-	if (!g_screenManager) {
-		return false;
-	}
+	HLEPlugins::SetKey(key.keyCode, (key.flags & KeyInputFlags::DOWN) ? 1 : 0);
 
 	// Handle releases of mousewheel keys.
 	if ((key.flags & KeyInputFlags::DOWN) && key.deviceId == DEVICE_ID_MOUSE && (key.keyCode == NKCODE_EXT_MOUSEWHEEL_UP || key.keyCode == NKCODE_EXT_MOUSEWHEEL_DOWN)) {
 		ProcessWheelRelease(key.keyCode, now, true);
 	}
 
-	HLEPlugins::SetKey(key.keyCode, (key.flags & KeyInputFlags::DOWN) ? 1 : 0);
+	if (!g_screenManager) {
+		return false;
+	}
+
+	// Filtering, detailed rules needed for good imgui behavior without having to ask the screen about what to do.
+	InputMode inputMode = g_screenManager->PassInputToMapper();
+	bool passKeyThrough = false;
+	if (inputMode != InputMode::None) {
+		if ((inputMode & InputMode::ImDebuggerToggle) && (key.flags & (KeyInputFlags::UP | KeyInputFlags::DOWN))) {
+			InputMapping mapping(key.deviceId, key.keyCode);
+			std::vector<int> pspButtons;
+			bool mappingFound = KeyMap::InputMappingToPspButton(mapping, &pspButtons);
+			if (mappingFound) {
+				for (auto b : pspButtons) {
+					if (b == VIRTKEY_TOGGLE_DEBUGGER || b == VIRTKEY_PAUSE) {
+						// TRUE
+						passKeyThrough = true;
+					}
+				}
+			}
+		}
+		if (key.deviceId == DEVICE_ID_MOUSE) {
+			if (inputMode & InputMode::Mouse) {
+				passKeyThrough = true;
+			}
+		} else if (key.deviceId == DEVICE_ID_KEYBOARD) {
+			if (inputMode & InputMode::Keyboard) {
+				passKeyThrough = true;
+			}
+		} else if (inputMode & InputMode::Other) {
+			// yes this is different
+			passKeyThrough = true;
+		}
+	} else {
+		// Pass through only up events.
+		if (key.flags & KeyInputFlags::UP) {
+			passKeyThrough = true;
+		}
+	}
+
+	if (passKeyThrough) {
+		g_controlMapper.Key(key);
+	}
+
+	// Ignore volume keys and stuff here - though we do send them through to the control mapper, so they can be mapped to PSP buttons.
+	switch (key.keyCode) {
+	case NKCODE_VOLUME_DOWN:
+	case NKCODE_VOLUME_UP:
+	case NKCODE_VOLUME_MUTE:
+		return false;
+	default:
+		break;
+	}
+
+	// Track modifier keys.
+	if (key.flags & KeyInputFlags::DOWN) {
+		switch (key.keyCode) {
+		case NKCODE_CTRL_LEFT: g_modifiersPressed |= KeyModifier::LCTRL; break;
+		case NKCODE_CTRL_RIGHT: g_modifiersPressed |= KeyModifier::RCTRL; break;
+		case NKCODE_SHIFT_LEFT: g_modifiersPressed |= KeyModifier::LSHIFT; break;
+		case NKCODE_SHIFT_RIGHT: g_modifiersPressed |= KeyModifier::RSHIFT; break;
+		case NKCODE_ALT_LEFT: g_modifiersPressed |= KeyModifier::LALT; break;
+		case NKCODE_ALT_RIGHT: g_modifiersPressed |= KeyModifier::RALT; break;
+		case NKCODE_META_LEFT: g_modifiersPressed |= KeyModifier::LMETA; break;
+		case NKCODE_META_RIGHT: g_modifiersPressed |= KeyModifier::RMETA; break;
+		default:
+			break;
+		}
+	}
+	if (key.flags & KeyInputFlags::UP) {
+		switch (key.keyCode) {
+		case NKCODE_CTRL_LEFT: g_modifiersPressed &= ~KeyModifier::LCTRL; break;
+		case NKCODE_CTRL_RIGHT: g_modifiersPressed &= ~KeyModifier::RCTRL; break;
+		case NKCODE_SHIFT_LEFT: g_modifiersPressed &= ~KeyModifier::LSHIFT; break;
+		case NKCODE_SHIFT_RIGHT: g_modifiersPressed &= ~KeyModifier::RSHIFT; break;
+		case NKCODE_ALT_LEFT: g_modifiersPressed &= ~KeyModifier::LALT; break;
+		case NKCODE_ALT_RIGHT: g_modifiersPressed &= ~KeyModifier::RALT; break;
+		case NKCODE_META_LEFT: g_modifiersPressed &= ~KeyModifier::LMETA; break;
+		case NKCODE_META_RIGHT: g_modifiersPressed &= ~KeyModifier::RMETA; break;
+		default:
+			break;
+		}
+	}
+
+	KeyInputFlags modifierFlags{};
+
+	if (g_modifiersPressed & (KeyModifier::LCTRL | KeyModifier::RCTRL)) {
+		modifierFlags |= KeyInputFlags::ModCtrl;
+	}
+	if (g_modifiersPressed & (KeyModifier::LSHIFT | KeyModifier::RSHIFT)) {
+		modifierFlags |= KeyInputFlags::ModShift;
+	}
+	if (g_modifiersPressed & (KeyModifier::LALT | KeyModifier::RALT)) {
+		modifierFlags |= KeyInputFlags::ModAlt;
+	}
+	if (g_modifiersPressed & (KeyModifier::LMETA | KeyModifier::RMETA)) {
+		modifierFlags |= KeyInputFlags::ModMeta;
+	}
+
+	KeyInput modKey = key;
+	modKey.flags |= modifierFlags;
+
+	bool retval = false;
+
+	UI::KeyEventResult kev = UI::KeyEventToFocusMoves(key);
+	if (!(key.flags & KeyInputFlags::IS_REPEAT)) {
+		// If a repeat, we follow what KeyEventToFocusMoves set it to.
+		// Otherwise we signal that we used the key, always.
+		kev = UI::KeyEventResult::ACCEPT;
+	}
+
+	switch (kev) {
+	case UI::KeyEventResult::ACCEPT:
+		retval = true;
+		break;
+	case UI::KeyEventResult::PASS_THROUGH:
+		retval = false;
+		break;
+	case UI::KeyEventResult::IGNORE_KEY:
+		return false;
+	}
+
 	// Dispatch the key event.
-	bool retval = g_screenManager->key(key);
+	g_screenManager->key(modKey);
 
 	// The Mode key can have weird consequences on some devices, see #17245.
 	if (key.keyCode == NKCODE_BUTTON_MODE) {
@@ -1445,9 +1575,15 @@ void NativeAxis(const AxisInput *axes, size_t count) {
 		return;
 	}
 
+	System_Notify(SystemNotification::ACTIVITY);
+
 	if (!g_screenManager) {
 		// Too early.
 		return;
+	}
+
+	if (g_screenManager->PassInputToMapper() & (InputMode::Other | InputMode::ImDebuggerToggle)) {
+		g_controlMapper.Axis(axes, count);
 	}
 
 	g_screenManager->axis(axes, count);
@@ -1572,6 +1708,8 @@ void NativeShutdown() {
 		delete g_screenManager;
 		g_screenManager = nullptr;
 	}
+
+	System_Notify(SystemNotification::BEFORE_CONFIG_SAVE_ON_EXIT);
 
 	g_Config.Save("NativeShutdown");
 

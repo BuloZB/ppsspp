@@ -37,6 +37,7 @@ enum class Log {
 	CPU,
 	FileSystem,
 	G3D,
+	TexCache,
 	HLE,
 	JIT,
 	Loader,
@@ -58,6 +59,7 @@ enum class Log {
 	UI,
 	IAP,
 	CwCheats,
+	Net,  // Non-sce related networking logs.
 
 	sceAudio,
 	sceCtrl,

@@ -273,6 +273,7 @@ static const ConfigSetting generalSettings[] = {
 	ConfigSetting("StateUndoLastSaveSlot", SETTING(g_Config, iStateUndoLastSaveSlot), -5, CfgFlag::DEFAULT), // Start with an "invalid" value
 	ConfigSetting("RewindSnapshotInterval", SETTING(g_Config, iRewindSnapshotInterval), 0, CfgFlag::PER_GAME),
 	ConfigSetting("SaveStateSlotCount", SETTING(g_Config, iSaveStateSlotCount), 5, CfgFlag::DEFAULT),
+	ConfigSetting("ReportAccurateFreeStorageSpace", SETTING(g_Config, bReportAccurateFreeStorageSpace), false, CfgFlag::DEFAULT),
 
 	ConfigSetting("ShowRegionOnGameIcon", SETTING(g_Config, bShowRegionOnGameIcon), false, CfgFlag::DEFAULT),
 	ConfigSetting("ShowIDOnGameIcon", SETTING(g_Config, bShowIDOnGameIcon), false, CfgFlag::DEFAULT),
@@ -716,13 +717,11 @@ static const ConfigSetting graphicsSettings[] = {
 	ConfigSetting("CameraMirrorHorizontal", SETTING(g_Config, bCameraMirrorHorizontal), false, CfgFlag::DEFAULT),
 	ConfigSetting("AndroidFramerateMode", SETTING(g_Config, iDisplayFramerateMode), 1, CfgFlag::DEFAULT),
 	ConfigSetting("VendorBugChecksEnabled", SETTING(g_Config, bVendorBugChecksEnabled), true, CfgFlag::DONT_SAVE),
-	ConfigSetting("UseGeometryShader", SETTING(g_Config, bUseGeometryShader), false, CfgFlag::PER_GAME),
 	ConfigSetting("SkipBufferEffects", SETTING(g_Config, bSkipBufferEffects), false, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("DepthRasterMode", SETTING(g_Config, iDepthRasterMode), &DefaultDepthRaster, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("SoftwareRenderer", SETTING(g_Config, bSoftwareRendering), false, CfgFlag::PER_GAME),
 	ConfigSetting("SoftwareRendererJit", SETTING(g_Config, bSoftwareRenderingJit), true, CfgFlag::PER_GAME),
 	ConfigSetting("HardwareTransform", SETTING(g_Config, bHardwareTransform), true, CfgFlag::PER_GAME | CfgFlag::REPORT),
-	ConfigSetting("SoftwareSkinning", SETTING(g_Config, bSoftwareSkinning), true, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("TextureFiltering", SETTING(g_Config, iTexFiltering), 1, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("Smart2DTexFiltering", SETTING(g_Config, bSmart2DTexFiltering), false, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("InternalResolution", SETTING(g_Config, iInternalResolution), &DefaultInternalResolution, CfgFlag::PER_GAME | CfgFlag::REPORT),
@@ -743,11 +742,11 @@ static const ConfigSetting graphicsSettings[] = {
 	ConfigSetting("AnisotropyLevel", SETTING(g_Config, iAnisotropyLevel), 4, CfgFlag::PER_GAME),
 	ConfigSetting("MultiSampleLevel", SETTING(g_Config, iMultiSampleLevel), 0, CfgFlag::PER_GAME),  // Number of samples is 1 << iMultiSampleLevel
 
-	ConfigSetting("TextureBackoffCache", SETTING(g_Config, bTextureBackoffCache), false, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("VertexDecJit", SETTING(g_Config, bVertexDecoderJit), &DefaultCodeGen, CfgFlag::DONT_SAVE | CfgFlag::REPORT),
 
 #ifndef MOBILE_DEVICE
 	ConfigSetting("FullScreen", SETTING(g_Config, bFullScreen), false, CfgFlag::DEFAULT),
+	ConfigSetting("FullScreenExclusive", SETTING(g_Config, bAllowFullScreenExclusive), false, CfgFlag::DEFAULT),
 	ConfigSetting("FullScreenMulti", SETTING(g_Config, bFullScreenMulti), false, CfgFlag::DEFAULT),
 #endif
 
@@ -774,7 +773,6 @@ static const ConfigSetting graphicsSettings[] = {
 
 	// Not really a graphics setting...
 	ConfigSetting("SplineBezierQuality", SETTING(g_Config, iSplineBezierQuality), 2, CfgFlag::PER_GAME | CfgFlag::REPORT),
-	ConfigSetting("HardwareTessellation", SETTING(g_Config, bHardwareTessellation), false, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("TextureShader", SETTING(g_Config, sTextureShaderName), "Off", CfgFlag::PER_GAME),
 	ConfigSetting("ShaderChainRequires60FPS", SETTING(g_Config, bShaderChainRequires60FPS), false, CfgFlag::PER_GAME),
 
@@ -792,7 +790,6 @@ static const ConfigSetting graphicsSettings[] = {
 	ConfigSetting("GpuLogProfiler", SETTING(g_Config, bGpuLogProfiler), false, CfgFlag::DEFAULT),
 
 	ConfigSetting("UberShaderVertex", SETTING(g_Config, bUberShaderVertex), true, CfgFlag::DEFAULT),
-	ConfigSetting("UberShaderFragment", SETTING(g_Config, bUberShaderFragment), true, CfgFlag::DEFAULT),
 
 	ConfigSetting("DisplayRefreshRate", SETTING(g_Config, iDisplayRefreshRate), g_Config.iDisplayRefreshRate, CfgFlag::PER_GAME),
 };
@@ -1032,6 +1029,11 @@ static const ConfigSetting controlSettings[] = {
 	ConfigSetting("AnalogSensitivity", SETTING(g_Config, fAnalogSensitivity), 1.1f, CfgFlag::PER_GAME),
 	ConfigSetting("AnalogIsCircular", SETTING(g_Config, bAnalogIsCircular), false, CfgFlag::PER_GAME),
 	ConfigSetting("AnalogAutoRotSpeed", SETTING(g_Config, fAnalogAutoRotSpeed), 8.0f, CfgFlag::PER_GAME),
+
+	// Advanced analog deadzone settings.
+	ConfigSetting("AnalogDeadzoneShape", SETTING(g_Config, iAnalogDeadzoneShape), 1, CfgFlag::PER_GAME),  // Default 1 (Square) matches legacy max-norm behavior
+	ConfigSetting("AnalogAxialDeadzone", SETTING(g_Config, fAnalogAxialDeadzone), 0.0f, CfgFlag::PER_GAME),
+	ConfigSetting("AnalogResponseCurve", SETTING(g_Config, iAnalogResponseCurve), 0, CfgFlag::PER_GAME),
 
 	ConfigSetting("AnalogLimiterDeadzone", SETTING(g_Config, fAnalogLimiterDeadzone), 0.6f, CfgFlag::DEFAULT),
 	ConfigSetting("AnalogTriggerThreshold", SETTING(g_Config, fAnalogTriggerThreshold), 0.75f, CfgFlag::DEFAULT),

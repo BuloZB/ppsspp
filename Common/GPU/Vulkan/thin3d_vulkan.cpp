@@ -19,6 +19,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <unordered_map>
 
 #include "Common/Log.h"
 #include "Common/StringUtils.h"
@@ -193,10 +194,9 @@ public:
 		if (module_) {
 			VkShaderModule shaderModule = module_->BlockUntilReady();
 			vulkan_->Delete().QueueDeleteShaderModule(shaderModule);
-			vulkan_->Delete().QueueCallback([](VulkanContext *context, void *m) {
-				auto module = (Promise<VkShaderModule> *)m;
+			vulkan_->Delete().QueueCallback([module = module_](VulkanContext *context) {
 				delete module;
-			}, module_);
+			});
 		}
 	}
 	Promise<VkShaderModule> *Get() const { return module_; }
@@ -473,6 +473,7 @@ public:
 
 	void BindPipeline(Pipeline *pipeline) override {
 		curPipeline_ = (VKPipeline *)pipeline;
+		_dbg_assert_(curPipeline_->pipeline);
 	}
 
 	void BindVertexBuffer(Buffer *vertexBuffer, int offset) override {
@@ -598,6 +599,8 @@ private:
 	AutoRef<VKSamplerState> boundSamplers_[MAX_BOUND_TEXTURES];
 	VkImageView boundImageView_[MAX_BOUND_TEXTURES]{};
 	TextureBindFlags boundTextureFlags_[MAX_BOUND_TEXTURES]{};
+
+	mutable std::unordered_map<DataFormat, uint32_t> dataFormatSupportCache_;
 
 	VulkanPushPool *push_ = nullptr;
 
@@ -833,7 +836,7 @@ bool VKTexture::Create(VkCommandBuffer cmd, VulkanBarrierBatch *postBarriers, Vu
 	}
 	VulkanBarrierBatch barrier;
 	if (!vkTex_->CreateDirect(width_, height_, 1, mipLevels_, vulkanFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, usageBits, &barrier, swizzle)) {
-		ERROR_LOG(Log::G3D,  "Failed to create VulkanTexture: %dx%dx%d fmt %d, %d levels", width_, height_, depth_, (int)vulkanFormat, mipLevels_);
+		ERROR_LOG(Log::G3D,  "Failed to create VKTexture: %dx%dx%d fmt %s, %d levels, tag '%s'", width_, height_, depth_, VulkanFormatToString(vulkanFormat), mipLevels_, desc.tag);
 		return false;
 	}
 	barrier.Flush(cmd);
@@ -918,7 +921,6 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 	caps_.coordConvention = CoordConvention::Vulkan;
 	caps_.setMaxFrameLatencySupported = true;
 	caps_.anisoSupported = vulkan->GetDeviceFeatures().enabled.standard.samplerAnisotropy != 0;
-	caps_.geometryShaderSupported = vulkan->GetDeviceFeatures().enabled.standard.geometryShader != 0;
 	caps_.tesselationShaderSupported = vulkan->GetDeviceFeatures().enabled.standard.tessellationShader != 0;
 	caps_.dualSourceBlend = vulkan->GetDeviceFeatures().enabled.standard.dualSrcBlend != 0;
 	caps_.depthClampSupported = vulkan->GetDeviceFeatures().enabled.standard.depthClamp != 0;
@@ -949,10 +951,12 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 	caps_.multiViewSupported = vulkan->GetDeviceFeatures().enabled.multiview.multiview != 0;
 	caps_.sampleRateShadingSupported = vulkan->GetDeviceFeatures().enabled.standard.sampleRateShading != 0;
 	caps_.textureSwizzleSupported = true;
+	caps_.samplerLodControl = true;
 
 	// Note that it must also be enabled on the pipelines (which we do).
 	caps_.provokingVertexLast = vulkan->GetDeviceFeatures().enabled.provokingVertex.provokingVertexLast;
 
+	caps_.fullScreenExclusiveSupported = vulkan->Extensions().EXT_full_screen_exclusive;
 	// Present mode stuff
 	caps_.presentMaxInterval = 1;
 	caps_.presentInstantModeChange = false;  // TODO: Fix this with some work in VulkanContext
@@ -1065,12 +1069,6 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 			bugs_.Infest(Bugs::EMPTY_RENDERPASS_BROKEN_MALI);
 		}
 
-		// Older ARM devices have very slow geometry shaders, not worth using.  At least before 15.
-		// Also seen to cause weird issues on 18, so let's lump it in.
-		if (majorVersion <= 18 || isOldVersion) {
-			bugs_.Infest(Bugs::GEOMETRY_SHADERS_SLOW_OR_BROKEN);
-		}
-
 		// Attempt to workaround #17386
 		if (isOldVersion) {
 			if (!strcmp(deviceProps.deviceName, "Mali-T880") ||
@@ -1138,7 +1136,7 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 	for (int i = 0; i < MAX_BOUND_TEXTURES; ++i) {
 		bindings[1 + i] = BindingType::COMBINED_IMAGE_SAMPLER;
 	}
-	pipelineLayout_ = renderManager_.CreatePipelineLayout(bindings, ARRAY_SIZE(bindings), caps_.geometryShaderSupported, "thin3d_layout");
+	pipelineLayout_ = renderManager_.CreatePipelineLayout(bindings, ARRAY_SIZE(bindings), "thin3d_layout");
 
 	VkPipelineCacheCreateInfo pc{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
 	VkResult res = vkCreatePipelineCache(vulkan_->GetDevice(), &pc, nullptr, &pipelineCache_);
@@ -1242,8 +1240,10 @@ Pipeline *VKContext::CreateGraphicsPipeline(const PipelineDesc &desc, const char
 		vkshader->AddRef();
 		pipeline->deps.push_back(vkshader);
 		if (vkshader->GetStage() == ShaderStage::Vertex) {
+			_dbg_assert_(!gDesc.vertexShader);  // can't have two
 			gDesc.vertexShader = vkshader->Get();
 		} else if (vkshader->GetStage() == ShaderStage::Fragment) {
+			_dbg_assert_(!gDesc.fragmentShader);  // can't have two
 			gDesc.fragmentShader = vkshader->Get();
 		} else {
 			ERROR_LOG(Log::G3D, "Bad stage");
@@ -1297,6 +1297,7 @@ Pipeline *VKContext::CreateGraphicsPipeline(const PipelineDesc &desc, const char
 	}
 
 	pipeline->pipeline = renderManager_.CreateGraphicsPipeline(&gDesc, pipelineFlags, 1 << (size_t)RenderPassType::BACKBUFFER, VK_SAMPLE_COUNT_1_BIT, false, tag ? tag : "thin3d");
+	_dbg_assert_(pipeline->pipeline);
 
 	if (desc.uniformDesc) {
 		pipeline->dynamicUniformSize = (int)desc.uniformDesc->uniformBufferSize;
@@ -1729,6 +1730,11 @@ std::vector<std::string> VKContext::GetExtensionList(bool device, bool enabledOn
 }
 
 uint32_t VKContext::GetDataFormatSupport(DataFormat fmt) const {
+	auto iter = dataFormatSupportCache_.find(fmt);
+	if (iter != dataFormatSupportCache_.end()) {
+		return iter->second;
+	}
+
 	VkFormat vulkan_format = DataFormatToVulkan(fmt);
 	VkFormatProperties properties;
 	vkGetPhysicalDeviceFormatProperties(vulkan_->GetCurrentPhysicalDevice(), vulkan_format, &properties);
@@ -1751,6 +1757,7 @@ uint32_t VKContext::GetDataFormatSupport(DataFormat fmt) const {
 	if (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) {
 		flags |= FMT_STORAGE_IMAGE;
 	}
+	dataFormatSupportCache_[fmt] = flags;
 	return flags;
 }
 
@@ -1769,10 +1776,9 @@ public:
 	}
 	~VKFramebuffer() {
 		_assert_msg_(buf_, "Null buf_ in VKFramebuffer - double delete?");
-		buf_->Vulkan()->Delete().QueueCallback([](VulkanContext *vulkan, void *fb) {
-			VKRFramebuffer *vfb = static_cast<VKRFramebuffer *>(fb);
-			delete vfb;
-		}, buf_);
+		buf_->Vulkan()->Delete().QueueCallback([buf = buf_](VulkanContext *vulkan) {
+			delete buf;
+		});
 		buf_ = nullptr;
 	}
 	VKRFramebuffer *GetFB() const { return buf_; }

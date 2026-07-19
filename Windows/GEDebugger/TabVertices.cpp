@@ -200,7 +200,8 @@ int CtrlVertexList::GetRowCount() {
 	auto state = gpu->GetGState();
 
 	GEPrimitiveType prim;
-	rowCount_ = gpu->GetCurrentPrimCount(&prim);
+	GECommand cmd;
+	rowCount_ = gpu->GetCurrentPrim(&prim, &cmd);
 
 	previewIndexOffset_ = 0;
 
@@ -213,7 +214,7 @@ int CtrlVertexList::GetRowCount() {
 	}
 
 	TransformStats stats;
-	if (!gpu->GetCurrentDrawAsDebugVertices(prim, &prim, rowCount_, vertices, indices, &previewIndexOffset_, &stats, flags)) {
+	if (!gpu->GetCurrentDrawAsDebugVertices(cmd, prim, &prim, rowCount_, &vertices, &indices, &previewIndexOffset_, &stats, flags)) {
 		rowCount_ = 0;
 	}
 
@@ -227,7 +228,7 @@ int CtrlVertexList::GetRowCount() {
 
 	VertexDecoderOptions options{};
 	// TODO: Maybe an option?
-	u32 vertTypeID = GetVertTypeID(state.vertType, state.getUVGenMode(), true);
+	u32 vertTypeID = GetVertTypeID(state.vertType, state.getUVGenMode());
 	decoder->SetVertexType(vertTypeID, options);
 	return rowCount_;
 }
@@ -327,7 +328,7 @@ bool CtrlMatrixList::OnColPrePaint(int row, int col, LPNMLVCUSTOMDRAW msg) {
 	return false;
 }
 
-bool CtrlMatrixList::ColChanged(const GPUgstate &lastState, const GPUgstate &state, int row, int col) {
+bool CtrlMatrixList::ColChanged(const GEState &lastState, const GEState &state, int row, int col) {
 	union {
 		float f;
 		uint32_t u;
@@ -339,7 +340,7 @@ bool CtrlMatrixList::ColChanged(const GPUgstate &lastState, const GPUgstate &sta
 	return newVal.u != oldVal.u;
 }
 
-bool CtrlMatrixList::GetValue(const GPUgstate &state, int row, int col, float &val) {
+bool CtrlMatrixList::GetValue(const GEState &state, int row, int col, float &val) {
 	if (!gpu || row < 0 || row >= MATRIXLIST_ROW_COUNT || col < 0 || col >= MATRIXLIST_COL_COUNT)
 		return false;
 

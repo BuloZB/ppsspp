@@ -395,7 +395,7 @@ LogoScreen::LogoScreen(AfterLogoScreen afterLogoScreen)
 }
 
 void LogoScreen::update() {
-	UIScreen::update();
+	UIBaseScreen::update();
 	double rate = std::max(30.0, (double)System_GetPropertyFloat(SYSPROP_DISPLAY_REFRESH_RATE));
 
 	if ((double)frames_ / rate > logoScreenSeconds) {
@@ -419,10 +419,12 @@ bool LogoScreen::key(const KeyInput &key) {
 	return false;
 }
 
-void LogoScreen::touch(const TouchInput &touch) {
+bool LogoScreen::touch(const TouchInput &touch) {
 	if (touch.flags & TouchInputFlags::DOWN) {
 		Next();
+		return true;
 	}
+	return false;
 }
 
 void LogoScreen::DrawForeground(UIContext &dc) {
@@ -590,7 +592,7 @@ void CreditsScreen::CreateDialogViews(UI::ViewGroup *parent) {
 }
 
 void CreditsScreen::update() {
-	UIScreen::update();
+	UISimpleBaseDialogScreen::update();
 	UpdateUIState(UISTATE_MENU);
 }
 

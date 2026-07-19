@@ -26,12 +26,11 @@
 #include "GPU/GPU.h"
 #include "GPU/ge_constants.h"
 #include "GPU/Common/ShaderCommon.h"
-#include "Common/Math/SIMDHeaders.h"
 #include "Common/Math/lin/vec3.h"
 
 class PointerWrap;
 
-struct GPUgstate {
+struct GEState {
 	// Getting rid of this ugly union in favor of the accessor functions
 	// might be a good idea....
 	union {
@@ -472,22 +471,19 @@ enum : u32 {
 	GPU_USE_VS_RANGE_CULLING = FLAG_BIT(3),
 	GPU_USE_BLEND_MINMAX = FLAG_BIT(4),
 	GPU_USE_LOGIC_OP = FLAG_BIT(5),
-	GPU_USE_FRAGMENT_UBERSHADER = FLAG_BIT(6),
-	// Free bit: 7
+	// Free bits: 6-7
 	GPU_USE_ANISOTROPY = FLAG_BIT(8),
 	GPU_USE_CLEAR_RAM_HACK = FLAG_BIT(9),
-	GPU_USE_INSTANCE_RENDERING = FLAG_BIT(10),
-	GPU_USE_VERTEX_TEXTURE_FETCH = FLAG_BIT(11),
-	GPU_USE_TEXTURE_FLOAT = FLAG_BIT(12),
+	// Free bit: 10-12
 	GPU_USE_16BIT_FORMATS = FLAG_BIT(13),
 	GPU_USE_DEPTH_CLAMP = FLAG_BIT(14),
-	GPU_USE_TEXTURE_LOD_CONTROL = FLAG_BIT(15),
+	GPU_USE_SAMPLER_LOD_CONTROL = FLAG_BIT(15),
 	GPU_USE_DEPTH_TEXTURE = FLAG_BIT(16),
 	// Free bit: 17
 	// Free bit: 18
 	GPU_USE_FRAMEBUFFER_ARRAYS = FLAG_BIT(19),
 	GPU_USE_FRAMEBUFFER_FETCH = FLAG_BIT(20),
-	// Free bit: 21,
+	// Free bit: 21
 	GPU_ROUND_FRAGMENT_DEPTH_TO_16BIT = FLAG_BIT(22),
 	GPU_ROUND_DEPTH_TO_16BIT = FLAG_BIT(23),  // Can be disabled either per game or if we use a real 16-bit depth buffer
 	GPU_USE_CLIP_DISTANCE = FLAG_BIT(24),
@@ -515,11 +511,9 @@ enum class SubmitType {
 	DRAW,
 	BEZIER,
 	SPLINE,
-	HW_BEZIER,
-	HW_SPLINE,
 };
 
-extern GPUgstate gstate;
+extern GEState gstate;
 
 struct GPUStateCache {
 	bool Use(u32 flags) const { return (useFlags_ & flags) != 0; } // Return true if ANY of flags are true.
@@ -540,15 +534,19 @@ struct GPUStateCache {
 	bool IsDirty(u64 what) const {
 		return (dirty & what) != 0ULL;
 	}
-	void SetUseShaderDepal(ShaderDepalMode mode) {
-		if (mode != shaderDepalMode) {
-			shaderDepalMode = mode;
-			Dirty(DIRTY_FRAGMENTSHADER_STATE);
+
+	void AdvanceVerts(u32 vertType, int count, int bytesRead) {
+		if ((vertType & GE_VTYPE_IDX_MASK) != GE_VTYPE_IDX_NONE) {
+			const int indexShift = ((vertType & GE_VTYPE_IDX_MASK) >> GE_VTYPE_IDX_SHIFT) - 1;
+			indexAddr += count << indexShift;
+		} else {
+			vertexAddr += bytesRead;
 		}
 	}
-	void SetTextureFullAlpha(bool fullAlpha) {
-		if (fullAlpha != textureFullAlpha) {
-			textureFullAlpha = fullAlpha;
+
+	void SetTextureSolidAlpha(bool solidAlpha) {
+		if (solidAlpha != textureSolidAlpha) {
+			textureSolidAlpha = solidAlpha;
 			Dirty(DIRTY_FRAGMENTSHADER_STATE | DIRTY_TEX_ALPHA_MUL);
 		}
 	}
@@ -575,12 +573,6 @@ struct GPUStateCache {
 	void SetTextureIsVideo(bool isVideo) {
 		textureIsVideo = isVideo;
 	}
-	void SetTextureIsBGRA(bool isBGRA) {
-		if (bgraTexture != isBGRA) {
-			bgraTexture = isBGRA;
-			Dirty(DIRTY_FRAGMENTSHADER_STATE);
-		}
-	}
 	void SetTextureIsFramebuffer(bool isFramebuffer) {
 		if (textureIsFramebuffer != isFramebuffer) {
 			textureIsFramebuffer = isFramebuffer;
@@ -599,21 +591,6 @@ struct GPUStateCache {
 		return useFlags_;
 	}
 
-	void UpdateUVScaleOffset() {
-#if defined(_M_SSE)
-		__m128i values = _mm_slli_epi32(_mm_load_si128((const __m128i *)&gstate.texscaleu), 8);
-		_mm_storeu_si128((__m128i *)&uv, values);
-#elif PPSSPP_ARCH(ARM_NEON)
-		const uint32x4_t values = vshlq_n_u32(vld1q_u32((const u32 *)&gstate.texscaleu), 8);
-		vst1q_u32((u32 *)&uv, values);
-#else
-		uv.uScale = getFloat24(gstate.texscaleu);
-		uv.vScale = getFloat24(gstate.texscalev);
-		uv.uOff = getFloat24(gstate.texoffsetu);
-		uv.vOff = getFloat24(gstate.texoffsetv);
-#endif
-	}
-
 private:
 	u32 useFlags_;
 public:
@@ -626,14 +603,16 @@ public:
 	bool usingDepth;  // For deferred depth copies.
 	bool clearingDepth;
 
-	bool textureFullAlpha;
+	bool textureSolidAlpha;
 	bool vertexFullAlpha;
+
+	// The PSP CPU can only safely modify textures *between* syncs, so we can safely cache textures without
+	// rehashing until the next sync. So for each texture we keep track which sync index we actually updated
+	// it on.
+	int textureSyncTimeDomain;
 
 	int skipDrawReason;
 
-	UVScale uv;
-
-	bool bgraTexture;
 	bool needShaderTexClamp;
 	bool textureIsArray;
 	bool textureIsFramebuffer;
@@ -641,7 +620,6 @@ public:
 	bool useFlagsChanged;
 
 	float morphWeights[8];
-	u32 deferredVertTypeDirty;
 
 	u32 curTextureWidth;
 	u32 curTextureHeight;
@@ -650,16 +628,6 @@ public:
 	int curTextureXOffset;
 	int curTextureYOffset;
 	bool curTextureIs3D;
-
-	float vpWidth;
-	float vpHeight;
-
-	float vpXOffset;
-	float vpYOffset;
-	float vpZOffset;
-	float vpWidthScale;
-	float vpHeightScale;
-	float vpDepthScale;
 
 	// Cached 4x4 products of the matrices.
 	// Useful for culling and extracing the final Z from vertices (so we can check if clipping is needed).
@@ -682,9 +650,6 @@ public:
 	// DST squared, used in Brave Story
 	bool dstSquared;
 
-	// U/V is 1:1 to pixels. Can influence texture sampling.
-	bool pixelMapped;
-
 	// TODO: These should be accessed from the current VFB object directly.
 	u32 curRTWidth;
 	u32 curRTHeight;
@@ -695,7 +660,7 @@ public:
 		if (xoff != curRTOffsetX || yoff != curRTOffsetY) {
 			curRTOffsetX = xoff;
 			curRTOffsetY = yoff;
-			Dirty(DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_PROJTHROUGHMATRIX);
+			Dirty(DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_FRAMEBUFFER_DIM);
 		}
 	}
 	int curRTOffsetX;
@@ -706,7 +671,15 @@ public:
 	int spline_num_points_u;
 
 	ShaderDepalMode shaderDepalMode;
-	GEBufferFormat depalFramebufferFormat;
+	GEBufferFormat depalTextureFormat;
+
+	void SetShaderDepal(ShaderDepalMode mode, GEBufferFormat texFormat = {}) {
+		if (mode != shaderDepalMode || (mode != ShaderDepalMode::OFF && texFormat != depalTextureFormat)) {
+			shaderDepalMode = mode;
+			depalTextureFormat = texFormat;
+			Dirty(DIRTY_FRAGMENTSHADER_STATE);
+		}
+	}
 
 	u32 getRelativeAddress(u32 data) const {
 		u32 baseExtended = ((gstate.base & 0x000F0000) << 8) | data;
@@ -720,4 +693,3 @@ class GPUInterface;
 class GPUCommon;
 
 extern GPUStateCache gstate_c;
-

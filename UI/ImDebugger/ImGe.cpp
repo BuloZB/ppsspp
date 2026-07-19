@@ -11,6 +11,7 @@
 #include "GPU/Common/TextureCacheCommon.h"
 #include "GPU/Common/VertexDecoderCommon.h"
 #include "GPU/Common/SoftwareTransformCommon.h"
+#include "GPU/Common/DrawEngineCommon.h"
 
 #include "Core/HLE/sceDisplay.h"
 #include "Core/HW/Display.h"
@@ -127,36 +128,44 @@ void DrawTexturesWindow(ImConfig &cfg, TextureCacheCommon *textureCache) {
 		ImGui::Text("Primary Cache");
 	}
 
-	for (auto &iter : textureCache->Cache()) {
-		u64 id = iter.first;
-		const TexCacheEntry *entry = iter.second.get();
-		void *nativeView = textureCache->GetNativeTextureView(iter.second.get(), true);
-		int w = 128;
-		int h = 128;
+	auto listTextureCache = [&cfg, &textureCache, &style, window_visible_x2, &replacementStateCounts](const TexCache &cache, bool isSecondary) {
+		for (auto &[key, value] : cache) {
+			u64 id = key;
+			ImGui::PushID((void *)id);
+			const TexCacheEntry *entry = value.get();
+			void *nativeView = textureCache->GetNativeTextureView(value.get(), true);
+			int w = 128;
+			int h = 128;
 
-		if (entry->replacedTexture) {
-			replacementStateCounts[(int)entry->replacedTexture->State()]++;
-		}
+			if (entry->replacedTexture) {
+				replacementStateCounts[(int)entry->replacedTexture->State()]++;
+			}
 
-		ImTextureID texId = ImGui_ImplThin3d_AddNativeTextureTemp(nativeView);
-		float last_button_x2 = ImGui::GetItemRectMax().x;
-		float next_button_x2 = last_button_x2 + style.ItemSpacing.x + w; // Expected position if next button was on same line
-		if (next_button_x2 < window_visible_x2)
+			ImTextureID texId = ImGui_ImplThin3d_AddNativeTextureTemp(nativeView);
+			float last_button_x2 = ImGui::GetItemRectMax().x;
+			float next_button_x2 = last_button_x2 + style.ItemSpacing.x + w; // Expected position if next button was on same line
+			if (next_button_x2 < window_visible_x2)
+				ImGui::SameLine();
+
+			float x = ImGui::GetCursorPosX();
+			if (ImGui::Selectable(("##Image" + std::to_string(id)).c_str(), cfg.selectedTexId == id, 0, ImVec2(w, h))) {
+				cfg.selectedTexId = id; // Update the selected index if clicked
+				cfg.selectedTexSecondary = isSecondary;
+			}
+
 			ImGui::SameLine();
-
-		float x = ImGui::GetCursorPosX();
-		if (ImGui::Selectable(("##Image" + std::to_string(id)).c_str(), cfg.selectedTexAddr == id, 0, ImVec2(w, h))) {
-			cfg.selectedTexAddr = id; // Update the selected index if clicked
+			ImGui::SetCursorPosX(x + 2.0f);
+			ImGui::Image(texId, ImVec2(128, 128));
+			ImGui::PopID();
 		}
+	};
 
-		ImGui::SameLine();
-		ImGui::SetCursorPosX(x + 2.0f);
-		ImGui::Image(texId, ImVec2(128, 128));
-	}
+	listTextureCache(textureCache->Cache(), false);
 
 	if (!textureCache->SecondCache().empty()) {
-		ImGui::Text("Secondary Cache (%d): TODO", (int)textureCache->SecondCache().size());
-		// TODO
+		ImGui::Text("Secondary Cache (%d):", (int)textureCache->SecondCache().size());
+
+		listTextureCache(textureCache->SecondCache(), true);
 	}
 
 	ImGui::EndChild();
@@ -164,9 +173,10 @@ void DrawTexturesWindow(ImConfig &cfg, TextureCacheCommon *textureCache) {
 	ImGui::SameLine();
 	ImGui::BeginChild("right", ImVec2(0.f, 0.0f));
 	if (ImGui::CollapsingHeader("Texture", nullptr, ImGuiTreeNodeFlags_DefaultOpen)) {
-		if (cfg.selectedTexAddr) {
-			auto iter = textureCache->Cache().find(cfg.selectedTexAddr);
-			if (iter != textureCache->Cache().end()) {
+		if (cfg.selectedTexId) {
+			auto &cache = cfg.selectedTexSecondary ? textureCache->SecondCache() : textureCache->Cache();
+			auto iter = cache.find(cfg.selectedTexId);
+			if (iter != cache.end()) {
 				void *nativeView = textureCache->GetNativeTextureView(iter->second.get(), true);
 				ImTextureID texId = ImGui_ImplThin3d_AddNativeTextureTemp(nativeView);
 				const TexCacheEntry *entry = iter->second.get();
@@ -174,12 +184,17 @@ void DrawTexturesWindow(ImConfig &cfg, TextureCacheCommon *textureCache) {
 				int w = dimWidth(dim);
 				int h = dimHeight(dim);
 				ImGui::Image(texId, ImVec2(w, h));
-				ImGui::Text("%08x: %dx%d, %d mips, %s", (uint32_t)(cfg.selectedTexAddr & 0xFFFFFFFF), w, h, entry->maxLevel + 1, GeTextureFormatToString((GETextureFormat)entry->format));
+				if (cfg.selectedTexSecondary) {
+					// For the secondary cache, the ID is based on the contents.
+					ImGui::Text("Hash: %08x: %dx%d, %d mips, %s", (uint32_t)(cfg.selectedTexId & 0xFFFFFFFF), w, h, entry->maxLevel + 1, GeTextureFormatToString((GETextureFormat)entry->format));
+				} else {
+					// Address is packed in the ID
+					ImGui::Text("Addr: %08x: %dx%d, %d mips, %s", (uint32_t)(cfg.selectedTexId & 0xFFFFFFFF), w, h, entry->maxLevel + 1, GeTextureFormatToString((GETextureFormat)entry->format));
+				}
 				ImGui::Text("Stride: %d", entry->bufw);
-				ImGui::Text("Status: %08x: %s", entry->status, TexStatusToString((TexCacheEntry::TexStatus)(entry->status)).c_str());
+				ImGui::Text("Status: %08x: %s", (u32)entry->status, TexStatusToString(entry->status).c_str());
 				ImGui::Text("Hash: %08x", entry->fullhash);
 				ImGui::Text("CLUT Hash: %08x", entry->cluthash);
-				ImGui::Text("Minihash: %08x", entry->minihash);
 				ImGui::Text("MaxSeenV: %08x", entry->maxSeenV);
 				if (entry->replacedTexture) {
 					if (ImGui::CollapsingHeader("Replacement", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -193,17 +208,16 @@ void DrawTexturesWindow(ImConfig &cfg, TextureCacheCommon *textureCache) {
 							ImGui::Text("Replaced: %dx%d, %d mip levels", w, h, numLevels);
 							ImGui::Text("Level 0 size: %d bytes, format: %s", entry->replacedTexture->GetLevelDataSizeAfterCopy(0), Draw::DataFormatToString(entry->replacedTexture->Format()));
 						}
-						ImGui::Text("Key: %08x_%08x", (u32)(desc.cachekey >> 32), (u32)desc.cachekey);
+						ImGui::Text("Key: %08x_%08x_%08x", desc.cacheKey.Address(), desc.cacheKey.ClutHash(), desc.cacheKey.ContentsHash());
 						ImGui::Text("Hashfiles: %s", desc.hashfiles.c_str());
 						ImGui::Text("Base: %s", desc.basePath.c_str());
-						ImGui::Text("Alpha status: %02x", entry->replacedTexture->AlphaStatus());
+						ImGui::Text("Alpha status: %d", (int)entry->replacedTexture->AlphaStatus());
 					}
 				} else {
 					ImGui::Text("Not replaced");
 				}
-				ImGui::Text("Frames until next full hash: %08x", entry->framesUntilNextFullHash);  // TODO: Show the flags
 			} else {
-				cfg.selectedTexAddr = 0;
+				cfg.selectedTexId = 0;
 			}
 		} else {
 			ImGui::Text("(no texture selected)");
@@ -577,7 +591,7 @@ void ImGePixelViewer::UpdateTexture(Draw::DrawContext *draw) {
 
 ImGeReadbackViewer::ImGeReadbackViewer() {
 	// These are only forward declared in the header, so we initialize them here.
-	aspect = Draw::Aspect::COLOR_BIT;
+	aspect_ = Draw::Aspect::COLOR_BIT;
 	readbackFmt_ = Draw::DataFormat::UNDEFINED;
 }
 
@@ -614,7 +628,7 @@ bool ImGeReadbackViewer::Draw(GPUCommon *gpuDebug, Draw::DrawContext *draw, floa
 		int w = vfb->fbo->Width();
 		int h = vfb->fbo->Height();
 		int rbBpp = 4;
-		switch (aspect) {
+		switch (aspect_) {
 		case Draw::Aspect::COLOR_BIT:
 			readbackFmt_ = Draw::DataFormat::R8G8B8A8_UNORM;
 			break;
@@ -631,7 +645,7 @@ bool ImGeReadbackViewer::Draw(GPUCommon *gpuDebug, Draw::DrawContext *draw, floa
 		}
 
 		data_ = new uint8_t[w * h * rbBpp];
-		draw->CopyFramebufferToMemory(vfb->fbo, aspect, 0, 0, w, h, readbackFmt_, data_, w, Draw::ReadbackMode::BLOCK, "debugger");
+		draw->CopyFramebufferToMemory(vfb->fbo, aspect_, 0, 0, w, h, readbackFmt_, data_, w, Draw::ReadbackMode::BLOCK, "debugger");
 
 		if (texture_) {
 			texture_->Release();
@@ -639,9 +653,12 @@ bool ImGeReadbackViewer::Draw(GPUCommon *gpuDebug, Draw::DrawContext *draw, floa
 		}
 
 		// For now, we just draw the color texture. The others we convert.
-		if (aspect != Draw::Aspect::COLOR_BIT) {
+		if (aspect_ != Draw::Aspect::COLOR_BIT || showAlpha_) {
 			uint8_t *texData = data_;
-			if (aspect == Draw::Aspect::DEPTH_BIT && scale != 1.0f) {
+			memset(histogram_, 0, sizeof(histogram_));
+			Draw::DataFormat fmt = rbBpp == 1 ? Draw::DataFormat::R8_UNORM : Draw::DataFormat::R32_FLOAT;
+
+			if (aspect_ == Draw::Aspect::DEPTH_BIT && scale != 1.0f) {
 				texData = new uint8_t[w * h * rbBpp];
 				// Apply scale
 				float *ptr = (float *)data_;
@@ -649,9 +666,28 @@ bool ImGeReadbackViewer::Draw(GPUCommon *gpuDebug, Draw::DrawContext *draw, floa
 				for (int i = 0; i < w * h; i++) {
 					tptr[i] = ptr[i] * scale;
 				}
+			} else if (aspect_ == Draw::Aspect::STENCIL_BIT) {
+				for (int i = 0; i < w * h; i++) {
+					histogram_[data_[i]]++;
+				}
+			} else if (aspect_ == Draw::Aspect::COLOR_BIT && showAlpha_) {
+				// Build a histogram of alpha values.
+				for (int i = 0; i < w * h; i++) {
+					histogram_[data_[i * 4 + 3]]++;
+				}
+				texData = new uint8_t[w * h * rbBpp];
+				// Also, tweak the pixels to actually show alpha as grayscale.
+				for (int i = 0; i < w * h; i++) {
+					uint8_t alpha = data_[i * 4 + 3];
+					texData[i * 4 + 0] = alpha;
+					texData[i * 4 + 1] = alpha;
+					texData[i * 4 + 2] = alpha;
+					texData[i * 4 + 3] = 255;
+				}
+
+				fmt = Draw::DataFormat::R8G8B8A8_UNORM;
 			}
 
-			Draw::DataFormat fmt = rbBpp == 1 ? Draw::DataFormat::R8_UNORM : Draw::DataFormat::R32_FLOAT;
 			Draw::TextureDesc desc{ Draw::TextureType::LINEAR2D,
 				fmt,
 				(int)w,
@@ -696,7 +732,11 @@ bool ImGeReadbackViewer::FormatValueAt(char *buf, size_t bufSize, int x, int y) 
 	case Draw::DataFormat::R8G8B8A8_UNORM:
 	{
 		const uint32_t *read32 = (const uint32_t *)(data_ + offset);
-		snprintf(buf, bufSize, "%08x", *read32);
+		int r = (*read32 >> 0) & 0xFF;
+		int g = (*read32 >> 8) & 0xFF;
+		int b = (*read32 >> 16) & 0xFF;
+		int a = (*read32 >> 24) & 0xFF;
+		snprintf(buf, bufSize, "%08x (RGBA %d, %d, %d, %d)", *read32, r, g, b, a);
 		return true;
 	}
 	case Draw::DataFormat::D32F:
@@ -714,6 +754,8 @@ bool ImGeReadbackViewer::FormatValueAt(char *buf, size_t bufSize, int x, int y) 
 		return true;
 	}
 	default:
+		_dbg_assert_(false);
+		snprintf(buf, bufSize, "N/A");
 		return false;
 	}
 }
@@ -891,7 +933,7 @@ static const char *DLStateToString(DisplayListState state) {
 }
 
 // TODO: Backport this to the Win32 debugger (ugh).
-static void DrawPreviewPrimitive(ImDrawList *drawList, ImVec2 p0, GEPrimitiveType prim, const std::vector<u16> &indices, const std::vector<GPUDebugVertex> &verts, int indexOffset, bool transformed, bool uvToPos, float sx, float sy) {
+static void DrawPreviewPrimitive(ImDrawList *drawList, ImVec2 p0, GECommand cmd, GEPrimitiveType prim, const std::vector<u16> &indices, const std::vector<GPUDebugVertex> &verts, int indexOffset, bool transformed, bool uvToPos, float sx, float sy) {
 	// These wrappers are to either draw using the positions or the UV coordinates.
 	auto x = [sx, uvToPos](const GPUDebugVertex &vert) {
 		return sx * (uvToPos ? vert.u : vert.x);
@@ -917,9 +959,16 @@ static void DrawPreviewPrimitive(ImDrawList *drawList, ImVec2 p0, GEPrimitiveTyp
 	case GE_PRIM_TRIANGLES:
 	{
 		for (int i = 0; i < count - 2; i += 3) {
-			const auto &v1 = indices.empty() ? verts[i + 0] : verts[indices[indexOffset + i + 0]];
-			const auto &v2 = indices.empty() ? verts[i + 1] : verts[indices[indexOffset + i + 1]];
-			const auto &v3 = indices.empty() ? verts[i + 2] : verts[indices[indexOffset + i + 2]];
+			const int index0 = indices.empty() ? (i + 0) : indices[indexOffset + i + 0];
+			const int index1 = indices.empty() ? (i + 1) : indices[indexOffset + i + 1];
+			const int index2 = indices.empty() ? (i + 2) : indices[indexOffset + i + 2];
+
+			if (index0 >= (int)verts.size() || index1 >= (int)verts.size() || index2 >= (int)verts.size()) {
+				continue;
+			}
+			const GPUDebugVertex &v1 = verts[index0];
+			const GPUDebugVertex &v2 = verts[index1];
+			const GPUDebugVertex &v3 = verts[index2];
 			drawList->AddTriangleFilled(
 				ImVec2(p0.x + x(v1), p0.y + y(v1)),
 				ImVec2(p0.x + x(v2), p0.y + y(v2)),
@@ -930,8 +979,14 @@ static void DrawPreviewPrimitive(ImDrawList *drawList, ImVec2 p0, GEPrimitiveTyp
 	case GE_PRIM_RECTANGLES:
 	{
 		for (int i = 0; i < count - 2; i += 3) {
-			const auto &tl = indices.empty() ? verts[i] : verts[indices[indexOffset + i]];
-			const auto &br = indices.empty() ? verts[i + 1] : verts[indices[indexOffset + i + 1]];
+			const int indexTL = indices.empty() ? (i + 0) : indices[indexOffset + i + 0];
+			const int indexBR = indices.empty() ? (i + 1) : indices[indexOffset + i + 1];
+			if (indexTL >= (int)verts.size() || indexBR >= (int)verts.size()) {
+				continue;
+			}
+
+			const GPUDebugVertex &tl = verts[indexTL];
+			const GPUDebugVertex & br = verts[indexBR];
 			drawList->AddRectFilled(
 				ImVec2(p0.x + x(tl), p0.y + y(tl)),
 				ImVec2(p0.x + x(br), p0.y + y(br)), ImColor(defaultColor));
@@ -941,9 +996,17 @@ static void DrawPreviewPrimitive(ImDrawList *drawList, ImVec2 p0, GEPrimitiveTyp
 	case GE_PRIM_TRIANGLE_FAN:
 	{
 		for (int i = 0; i < count - 2; i++) {
-			const auto &v1 = indices.empty() ? verts[0] : verts[indices[indexOffset + 0]];
-			const auto &v2 = indices.empty() ? verts[i + 1] : verts[indices[indexOffset + i + 1]];
-			const auto &v3 = indices.empty() ? verts[i + 2] : verts[indices[indexOffset + i + 2]];
+			const int index0 = indices.empty() ? 0 : indices[indexOffset + 0];
+			const int index1 = indices.empty() ? (i + 1) : indices[indexOffset + i + 1];
+			const int index2 = indices.empty() ? (i + 2) : indices[indexOffset + i + 2];
+
+			if (index0 >= (int)verts.size() || index1 >= (int)verts.size() || index2 >= (int)verts.size()) {
+				continue;
+			}
+
+			const GPUDebugVertex &v1 = verts[index0];
+			const GPUDebugVertex &v2 = verts[index1];
+			const GPUDebugVertex &v3 = verts[index2];
 			drawList->AddTriangleFilled(
 				ImVec2(p0.x + x(v1), p0.y + y(v1)),
 				ImVec2(p0.x + x(v2), p0.y + y(v2)),
@@ -958,9 +1021,15 @@ static void DrawPreviewPrimitive(ImDrawList *drawList, ImVec2 p0, GEPrimitiveTyp
 			int i0 = i;
 			int i1 = i + t;
 			int i2 = i + (t ^ 3);
-			const auto &v1 = indices.empty() ? verts[i0] : verts[indices[indexOffset + i0]];
-			const auto &v2 = indices.empty() ? verts[i1] : verts[indices[indexOffset + i1]];
-			const auto &v3 = indices.empty() ? verts[i2] : verts[indices[indexOffset + i2]];
+			const int index0 = indices.empty() ? i0 : indices[indexOffset + i0];
+			const int index1 = indices.empty() ? i1 : indices[indexOffset + i1];
+			const int index2 = indices.empty() ? i2 : indices[indexOffset + i2];
+			if (index0 >= (int)verts.size() || index1 >= (int)verts.size() || index2 >= (int)verts.size()) {
+				continue;
+			}
+			const GPUDebugVertex &v1 = verts[index0];
+			const GPUDebugVertex &v2 = verts[index1];
+			const GPUDebugVertex &v3 = verts[index2];
 			drawList->AddTriangleFilled(
 				ImVec2(p0.x + x(v1), p0.y + y(v1)),
 				ImVec2(p0.x + x(v2), p0.y + y(v2)),
@@ -972,8 +1041,13 @@ static void DrawPreviewPrimitive(ImDrawList *drawList, ImVec2 p0, GEPrimitiveTyp
 	case GE_PRIM_LINES:
 	{
 		for (int i = 0; i < count - 1; i += 2) {
-			const auto &v1 = indices.empty() ? verts[i] : verts[indices[indexOffset + i]];
-			const auto &v2 = indices.empty() ? verts[i + 1] : verts[indices[indexOffset + i + 1]];
+			const int index0 = indices.empty() ? (i + 0) : indices[indexOffset + i + 0];
+			const int index1 = indices.empty() ? (i + 1) : indices[indexOffset + i + 1];
+			if (index0 >= (int)verts.size() || index1 >= (int)verts.size()) {
+				continue;
+			}
+			const GPUDebugVertex &v1 = verts[index0];
+			const GPUDebugVertex &v2 = verts[index1];
 			drawList->AddLine(
 				ImVec2(p0.x + x(v1), p0.y + y(v1)),
 				ImVec2(p0.x + x(v2), p0.y + y(v2)), ImColor(defaultColor));
@@ -983,8 +1057,13 @@ static void DrawPreviewPrimitive(ImDrawList *drawList, ImVec2 p0, GEPrimitiveTyp
 	case GE_PRIM_LINE_STRIP:
 	{
 		for (int i = 0; i < count - 2; i++) {
-			const auto &v1 = indices.empty() ? verts[i] : verts[indices[indexOffset + i]];
-			const auto &v2 = indices.empty() ? verts[i + 1] : verts[indices[indexOffset + i + 1]];
+			const int index0 = indices.empty() ? (i + 0) : indices[indexOffset + i + 0];
+			const int index1 = indices.empty() ? (i + 1) : indices[indexOffset + i + 1];
+			if (index0 >= (int)verts.size() || index1 >= (int)verts.size()) {
+				continue;
+			}
+			const GPUDebugVertex &v1 = verts[index0];
+			const GPUDebugVertex &v2 = verts[index1];
 			drawList->AddLine(
 				ImVec2(p0.x + x(v1), p0.y + y(v1)),
 				ImVec2(p0.x + x(v2), p0.y + y(v2)), ImColor(defaultColor));
@@ -1040,7 +1119,7 @@ void ImGeDebuggerWindow::NotifyStep() {
 		rbViewer_.fbAddr = gstate.getFrameBufAddress();
 		rbViewer_.fbStride = gstate.FrameBufStride();
 		rbViewer_.fbFormat = gstate.FrameBufFormat();
-		rbViewer_.aspect = selectedAspect_;
+		rbViewer_.aspect_ = selectedAspect_;
 	}
 	rbViewer_.Snapshot();
 }
@@ -1108,6 +1187,11 @@ void ImGeDebuggerWindow::Draw(ImConfig &cfg, ImControl &control, GPUCommon *gpuD
 	if (ImGui::RepeatButtonShift("Single step", fastRepeatRate)) {
 		gpuDebug->SetBreakNext(GPUDebug::BreakNext::OP);
 	}
+	ImGui::SameLine();
+	if (ImGui::Button("Cancel step")) {
+		gpuDebug->ClearBreakNext();
+	}
+
 	if (disableStepButtons) {
 		ImGui::EndDisabled();
 	}
@@ -1142,13 +1226,9 @@ void ImGeDebuggerWindow::Draw(ImConfig &cfg, ImControl &control, GPUCommon *gpuD
 		}
 		if (showBannerInFrames_ == 0) {
 			ImGui::Text("Step pending: %s", GPUDebug::BreakNextToString(gpuDebug->GetBreakNext()));
-			ImGui::SameLine();
 			if (gpuDebug->GetBreakNext() == GPUDebug::BreakNext::COUNT) {
-				ImGui::Text("(%d)", gpuDebug->GetBreakCount());
 				ImGui::SameLine();
-			}
-			if (ImGui::Button("Cancel step")) {
-				gpuDebug->ClearBreakNext();
+				ImGui::Text("(%d)", gpuDebug->GetBreakCount());
 			}
 		}
 	} else {
@@ -1208,34 +1288,25 @@ void ImGeDebuggerWindow::Draw(ImConfig &cfg, ImControl &control, GPUCommon *gpuD
 
 	u32 op = 0;
 	DisplayList list;
-	bool isOnBlockTransfer = false;
 	if (gpuDebug->GetCurrentDisplayList(list)) {
 		_dbg_assert_(Memory::IsValid4AlignedAddress(list.pc));
 		op = Memory::ReadUnchecked_U32(list.pc);
 
+		GECommand cmd = static_cast<GECommand>(op >> 24);
+		previewCmd_ = cmd;
 		// TODO: Also add support for block transfer previews!
-
-		bool isOnPrim = false;
-		switch (op >> 24) {
-		case GE_CMD_PRIM:
-			isOnPrim = true;
+		if (cmd == GE_CMD_PRIM || cmd == GE_CMD_BOUNDINGBOX) {
 			if (reloadPreview_) {
-				GetPrimPreview(op, previewPrim_, previewVertices_, previewIndices_, &previewIndexOffset_, previewTransformed_);
+				GetPrimPreview(op, &previewPrim_, &previewVertices_, &previewIndices_, &previewIndexOffset_, previewTransformed_);
 				reloadPreview_ = false;
 			}
-			break;
-		case GE_CMD_TRANSFERSTART:
-			isOnBlockTransfer = true;
-			break;
-		default:
+		} else {
 			// Disable the current preview.
 			previewVertices_.clear();
 			previewIndices_.clear();
 			previewIndexOffset_ = 0;
 			previewTransformed_ = true;
-			break;
 		}
-
 	}
 
 	ImGui::BeginChild("texture/fb view");
@@ -1243,7 +1314,7 @@ void ImGeDebuggerWindow::Draw(ImConfig &cfg, ImControl &control, GPUCommon *gpuD
 	ImDrawList *drawList = ImGui::GetWindowDrawList();
 
 	if (coreState == CORE_STEPPING_GE) {
-		if (isOnBlockTransfer) {
+		if (previewCmd_ == GE_CMD_TRANSFERSTART) {
 			ImGui::Text("Block transfer! Proper preview coming in the future.\n");
 			ImGui::Text("%08x -> %08x, %d bpp (strides: %d, %d)", gstate.getTransferSrcAddress(), gstate.getTransferDstAddress(), gstate.getTransferBpp(), gstate.getTransferSrcStride(), gstate.getTransferDstStride());
 			ImGui::Text("%dx%d pixels", gstate.getTransferWidth(), gstate.getTransferHeight());
@@ -1267,7 +1338,12 @@ void ImGeDebuggerWindow::Draw(ImConfig &cfg, ImControl &control, GPUCommon *gpuD
 			}
 			ImGui::SetNextItemWidth(200.0f);
 			ImGui::SliderFloat("Zoom", &previewZoom_, 0.125f, 2.f, "%.3f", ImGuiSliderFlags_Logarithmic);
-
+			if (selectedAspect_ == Draw::Aspect::COLOR_BIT) {
+				ImGui::SameLine();
+				if (ImGui::Checkbox("Alpha", &rbViewer_.showAlpha_)) {
+					rbViewer_.Snapshot();
+				}
+			}
 			// Use selectable instead of tab bar so we can get events (haven't figured that out).
 			static const Draw::Aspect aspects[3] = { Draw::Aspect::COLOR_BIT, Draw::Aspect::DEPTH_BIT, Draw::Aspect::STENCIL_BIT, };
 			static const char *const aspectNames[3] = { "Color", "Depth", "Stencil" };
@@ -1318,14 +1394,14 @@ void ImGeDebuggerWindow::Draw(ImConfig &cfg, ImControl &control, GPUCommon *gpuD
 
 			// Draw vertex preview on top!
 			if (!previewVertices_.empty()) {
-				DrawPreviewPrimitive(drawList, p0, previewPrim_, previewIndices_, previewVertices_, previewIndexOffset_, previewTransformed_, false, scale * previewZoom_, scale * previewZoom_);
+				DrawPreviewPrimitive(drawList, p0, previewCmd_, previewPrim_, previewIndices_, previewVertices_, previewIndexOffset_, previewTransformed_, false, scale * previewZoom_, scale * previewZoom_);
 			}
 
 			drawList->PopClipRect();
 
 			if (ImGui::IsItemHovered()) {
-				int x = (int)(ImGui::GetMousePos().x - p0.x) * previewZoom_;
-				int y = (int)(ImGui::GetMousePos().y - p0.y) * previewZoom_;
+				int x = (int)(ImGui::GetMousePos().x - p0.x) / previewZoom_;
+				int y = (int)(ImGui::GetMousePos().y - p0.y) / previewZoom_;
 				char temp[128];
 				if (lookup->FormatValueAt(temp, sizeof(temp), x, y)) {
 					ImGui::Text("(%d, %d): %s", x, y, temp);
@@ -1334,6 +1410,13 @@ void ImGeDebuggerWindow::Draw(ImConfig &cfg, ImControl &control, GPUCommon *gpuD
 				}
 			} else {
 				ImGui::TextUnformatted("(no pixel hovered)");
+			}
+
+			if (lookup->GetHistogramSize() > 0) {
+				ImGui::PlotHistogram("##histogram", [](void *data, int idx) -> float {
+					PixelLookup *lookup = static_cast<PixelLookup *>(data);
+					return lookup->GetHistogramValue(idx);
+				}, lookup, 256, 0, nullptr, FLT_MAX, FLT_MAX, ImVec2(0, 80));
 			}
 
 			if (vfb && vfb->fbo) {
@@ -1347,18 +1430,16 @@ void ImGeDebuggerWindow::Draw(ImConfig &cfg, ImControl &control, GPUCommon *gpuD
 				ImGui::Text("(clear mode - texturing not used)");
 			} else if (!gstate.isTextureMapEnabled()) {
 				ImGui::Text("(texturing not enabled");
-			} else {
-				TextureCacheCommon *texcache = gpuDebug->GetTextureCacheCommon();
-				TexCacheEntry *tex = texcache ? texcache->SetTexture() : nullptr;
-				if (tex) {
+			} else if (TextureCacheCommon *texcache = gpuDebug->GetTextureCacheCommon()) {  // We don't bother with the texture if previewCmd is BOUNDING_BOX - no texturing happens there.
+				TextureApplyResult result = texcache->ApplyTexture(false);
+				if (TexCacheEntry *tex = result.texCacheEntry) {
 					ImGui::Text("Texture: %08x", tex->addr);
-					texcache->ApplyTexture(false);
 
 					void *nativeView = texcache->GetNativeTextureView(tex, true);
 					ImTextureID texId = ImGui_ImplThin3d_AddNativeTextureTemp(nativeView);
 
-					float texW = dimWidth(tex->dim);
-					float texH = dimHeight(tex->dim);
+					const float texW = dimWidth(tex->dim);
+					const float texH = dimHeight(tex->dim);
 
 					const ImVec2 p0 = ImGui::GetCursorScreenPos();
 					const ImVec2 sz = ImGui::GetContentRegionAvail();
@@ -1369,16 +1450,24 @@ void ImGeDebuggerWindow::Draw(ImConfig &cfg, ImControl &control, GPUCommon *gpuD
 
 					ImGui::Image(texId, ImVec2(texW, texH));
 
-					// Show the preview as texcoords. TODO: We should probably use unclipped data here?
-					DrawPreviewPrimitive(drawList, p0, previewPrim_, previewIndices_, previewVertices_, previewIndexOffset_, previewTransformed_, true, texW, texH);
+					// Don't bother with trying to preview bounding box here, it only has positions, no texcoords.
+					if (previewCmd_ == GE_CMD_PRIM || previewCmd_ == GE_CMD_BEZIER || previewCmd_ == GE_CMD_SPLINE) {
+						// Show the preview as texcoords. TODO: We should probably use unclipped data here?
+						DrawPreviewPrimitive(drawList, p0, previewCmd_, previewPrim_, previewIndices_, previewVertices_, previewIndexOffset_, previewTransformed_, true, texW, texH);
+					}
 
 					drawList->PopClipRect();
-
+				} else if (const VirtualFramebuffer *fb = result.framebuffer) {
+					// A framebuffer.
+					// TODO: More detail here.
+					ImGui::Text("Framebuffer as texture: %08x", fb->fb_address);
 				} else {
+					// Will end up here in the CLUT8 texture cache for now :/
 					ImGui::Text("(no valid texture bound)");
-					// In software mode, we should just decode the texture here.
-					// TODO: List some of the texture params here.
 				}
+			} else {
+				// Software mode?
+				ImGui::Text("(texture cache not available)");
 			}
 
 			// Let's display the current CLUT.
@@ -1591,7 +1680,7 @@ void ImGeStateWindow::Draw(ImConfig &cfg, ImControl &control, GPUCommon *gpuDebu
 					bool sectionOpen = false;
 					for (size_t i = 0; i < numRows; i++) {
 						const GECmdInfo &info = GECmdInfoByCmd(rows[i].cmd);
-						const GPUgstate &lastState = GPUStepping::LastState();
+						const GEState &lastState = GPUStepping::LastState();
 						bool diff = lastState.cmdmem[rows[i].cmd] != gstate.cmdmem[rows[i].cmd];
 
 						if (rows[i].header) {
@@ -1705,7 +1794,7 @@ void ImGeStateWindow::Draw(ImConfig &cfg, ImControl &control, GPUCommon *gpuDebu
 	ImGui::End();
 }
 
-void DrawImGeVertsWindow(ImConfig &cfg, ImControl &control, GPUCommon *gpuDebug) {
+void DrawImGeVertsWindow(ImConfig &cfg, ImControl &control, GPUCommon *gpu) {
 	ImGui::SetNextWindowSize(ImVec2(300, 500), ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin("GE Vertices", &cfg.geVertsOpen)) {
 		ImGui::End();
@@ -1724,7 +1813,7 @@ void DrawImGeVertsWindow(ImConfig &cfg, ImControl &control, GPUCommon *gpuDebug)
 		ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV | ImGuiTableFlags_NoBordersInBody | ImGuiTableFlags_ScrollY;
 
 	if (ImGui::BeginTabBar("vertexmode", ImGuiTabBarFlags_None)) {
-		auto state = gpuDebug->GetGState();
+		auto state = gpu->GetGState();
 		auto buildVertexTable = [&](bool transformed) {
 			// Let's see if it's fast enough to just do all this each frame.
 			GEPrimitiveType prim;
@@ -1740,11 +1829,14 @@ void DrawImGeVertsWindow(ImConfig &cfg, ImControl &control, GPUCommon *gpuDebug)
 				flags |= DebugVertexFlags::Clipped;
 			}
 
-			int inputVertexCount = gpuDebug->GetCurrentPrimCount(&prim);
+			GECommand cmd;
+			int inputVertexCount = gpu->GetCurrentPrim(&prim, &cmd);
+
+			// TODO: If cmd is BOUNDING_BOX, actually test the bounding box here and show the result.
 
 			// This performs software transform, if transformed is checked. We might want to cache it? Although, it's only for a single draw...
-			TransformStats stats;
-			if (!gpuDebug->GetCurrentDrawAsDebugVertices(prim, &prim, inputVertexCount, vertices, indices, &indexOffset, &stats, flags)) {
+			TransformStats stats{};
+			if (!gpu->GetCurrentDrawAsDebugVertices(cmd, prim, &prim, inputVertexCount, &vertices, &indices, &indexOffset, &stats, flags)) {
 				inputVertexCount = 0;
 			}
 
@@ -1752,7 +1844,7 @@ void DrawImGeVertsWindow(ImConfig &cfg, ImControl &control, GPUCommon *gpuDebug)
 
 			char statusLine[256];
 			StringWriter w(statusLine);
-			w.F("%s: ", GePrimTypeToString(prim));
+			w.F("%s - %s: ", GeCmdToString(cmd), GePrimTypeToString(prim));
 			char fmtTemp[256];
 			FormatStateRow(fmtTemp, sizeof(fmtTemp), CMD_FMT_VERTEXTYPE, state.vertType, true, false, false);
 			w.F("%s", fmtTemp);
@@ -1793,7 +1885,9 @@ void DrawImGeVertsWindow(ImConfig &cfg, ImControl &control, GPUCommon *gpuDebug)
 						for (int column = 0; column < colCount; column++) {
 							ImGui::TableNextColumn();
 							char temp[36];
-							if (transformed) {
+							if ((size_t)index >= vertices.size()) {
+								snprintf(temp, sizeof(temp), "(%d: idx out of range)", index);
+							} else if (transformed) {
 								FormatVertColTransformed(temp, sizeof(temp), vertices[index], (VertexListTransformedCol)column);
 							} else {
 								FormatVertColDecoded(temp, sizeof(temp), vertices[index], (VertexListDecodedCol)column);

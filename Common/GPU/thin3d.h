@@ -133,14 +133,6 @@ enum class Primitive {
 	TRIANGLE_LIST,
 	TRIANGLE_STRIP,
 	TRIANGLE_FAN,
-	// Tesselation shader only
-	PATCH_LIST,
-	// These are for geometry shaders only.
-	LINE_LIST_ADJ,
-	LINE_STRIP_ADJ,
-	TRIANGLE_LIST_ADJ,
-	TRIANGLE_STRIP_ADJ,
-
 	UNDEFINED,
 	PRIMITIVE_TYPE_COUNT,
 };
@@ -148,6 +140,7 @@ enum class Primitive {
 enum VertexShaderPreset : int {
 	VS_COLOR_2D,
 	VS_TEXTURE_COLOR_2D,
+	VS_TEXTURE_COLOR_2D_NO_TINT,
 	VS_MAX_PRESET,
 };
 
@@ -155,6 +148,7 @@ enum FragmentShaderPreset : int {
 	FS_COLOR_2D,
 	FS_TEXTURE_COLOR_2D,
 	FS_TEXTURE_COLOR_2D_RB_SWIZZLE,
+	FS_TEXTURE_COLOR_2D_ALPHA_TO_GRAY,
 	FS_MAX_PRESET,
 };
 
@@ -349,7 +343,6 @@ public:
 		RASPBERRY_SHADER_COMP_HANG = 8,
 		MALI_CONSTANT_LOAD_BUG = 9,
 		SUBPASS_FEEDBACK_BROKEN = 10,
-		GEOMETRY_SHADERS_SLOW_OR_BROKEN = 11,
 		ADRENO_RESOURCE_DEADLOCK = 12,
 		UNIFORM_INDEXING_BROKEN = 13,  // not a properly diagnosed issue, a workaround attempt: #17386
 		PVR_BAD_16BIT_TEXFORMATS = 14,
@@ -607,7 +600,6 @@ struct DeviceCaps {
 
 	bool anisoSupported;
 	bool depthRangeMinusOneToOne;  // OpenGL style depth
-	bool geometryShaderSupported;
 	bool tesselationShaderSupported;
 	bool dualSourceBlend;
 	bool logicOpSupported;
@@ -633,6 +625,8 @@ struct DeviceCaps {
 	bool requiresHalfPixelOffset;
 	bool provokingVertexLast;  // GL behavior, what the PSP does
 	bool verySlowShaderCompiler;
+	bool fullScreenExclusiveSupported;
+	bool samplerLodControl;
 
 	// Old style, for older GL or Direct3D 9.
 	u32 clipPlanesSupported;
@@ -769,8 +763,16 @@ public:
 	virtual Pipeline *CreateGraphicsPipeline(const PipelineDesc &desc, const char *tag) = 0;
 
 	// Note that these DO NOT AddRef so you must not ->Release presets unless you manually AddRef them.
-	ShaderModule *GetVshaderPreset(VertexShaderPreset preset) { return vsPresets_[preset]; }
-	ShaderModule *GetFshaderPreset(FragmentShaderPreset preset) { return fsPresets_[preset]; }
+	ShaderModule *GetVshaderPreset(VertexShaderPreset preset) {
+		ShaderModule *module = vsPresets_[preset];
+		_dbg_assert_(module->GetStage() == ShaderStage::Vertex);
+		return module;
+	}
+	ShaderModule *GetFshaderPreset(FragmentShaderPreset preset) {
+		ShaderModule *module = fsPresets_[preset];
+		_dbg_assert_(module->GetStage() == ShaderStage::Fragment);
+		return module;
+	}
 
 	// Resources
 	virtual Buffer *CreateBuffer(size_t size, uint32_t usageFlags) = 0;
@@ -910,13 +912,13 @@ public:
 protected:
 	HistoryBuffer<FrameTimeData, FRAME_TIME_HISTORY_LENGTH> frameTimeHistory_;
 
-	ShaderModule *vsPresets_[VS_MAX_PRESET];
-	ShaderModule *fsPresets_[FS_MAX_PRESET];
+	ShaderModule *vsPresets_[VS_MAX_PRESET]{};
+	ShaderModule *fsPresets_[FS_MAX_PRESET]{};
 
 	ShaderLanguageDesc shaderLanguageDesc_;
 
-	int targetWidth_;
-	int targetHeight_;
+	int targetWidth_ = 0;
+	int targetHeight_ = 0;
 
 	Bugs bugs_;
 };

@@ -28,6 +28,8 @@
 #include "GPU/Common/DrawEngineCommon.h"
 #include "GPU/Common/VertexDecoderCommon.h"
 #include "GPU/Common/SoftwareTransformCommon.h"
+#include "GPU/Common/VertexReader.h"
+#include "GPU/GPUStateSIMDUtil.h"
 #include "Common/Math/SIMDHeaders.h"
 #include "GPU/Software/BinManager.h"
 #include "GPU/Software/Clipper.h"
@@ -61,7 +63,6 @@ SoftwareDrawEngine::~SoftwareDrawEngine() {}
 
 void SoftwareDrawEngine::NotifyConfigChanged() {
 	DrawEngineCommon::NotifyConfigChanged();
-	applySkinInDecode_ = true;
 }
 
 void SoftwareDrawEngine::Flush() {
@@ -74,7 +75,7 @@ void SoftwareDrawEngine::DispatchSubmitPrim(const void *verts, const void *inds,
 }
 
 void SoftwareDrawEngine::DispatchSubmitImm(GEPrimitiveType prim, TransformedVertex *buffer, int vertexCount, int cullMode, bool continuation) {
-	uint32_t vertTypeID = GetVertTypeID(gstate.vertType | GE_VTYPE_POS_FLOAT, gstate.getUVGenMode(), true);
+	uint32_t vertTypeID = GetVertTypeID(gstate.vertType | GE_VTYPE_POS_FLOAT, gstate.getUVGenMode());
 
 	int flipCull = cullMode != gstate.getCullMode() ? 1 : 0;
 	// TODO: For now, just setting all dirty.
@@ -139,7 +140,7 @@ void SoftwareDrawEngine::DispatchSubmitImm(GEPrimitiveType prim, TransformedVert
 }
 
 VertexDecoder *SoftwareDrawEngine::FindVertexDecoder(u32 vtype) {
-	const u32 vertTypeID = GetVertTypeID(vtype, gstate.getUVGenMode(), true);
+	const u32 vertTypeID = GetVertTypeID(vtype, gstate.getUVGenMode());
 	return DrawEngineCommon::GetVertexDecoder(vertTypeID);
 }
 
@@ -350,8 +351,7 @@ ClipVertexData TransformUnit::ReadVertex(const VertexReader &vreader, const Tran
 	ClipVertexData vertex;
 
 	ModelCoords pos;
-	// VertexDecoder normally scales z, but we want it unscaled.
-	vreader.ReadPosThroughZ16(pos.AsArray());
+	vreader.ReadPosThrough(pos.AsArray());
 
 	static Vec3Packedf lastTC;
 	if (state.readUV) {
@@ -482,7 +482,8 @@ public:
 			GetIndexBounds(indices, vertex_count, vertex_type, &lowerBound_, &upperBound_);
 		if (vertex_count != 0) {
 			const int count = upperBound_ - lowerBound_ + 1;
-			vdecoder.DecodeVerts(base, (const u8 *)vertices + vdecoder.VertexSize() * lowerBound_, &gstate_c.uv, count);
+			const UVScale uvScale = LoadUVScaleOffset(gstate);
+			vdecoder.DecodeVerts(base, (const u8 *)vertices + vdecoder.VertexSize() * lowerBound_, &uvScale, count);
 		}
 
 		// If we're only using a subset of verts, it's better to decode with random access (usually.)
@@ -863,7 +864,8 @@ void TransformUnit::SubmitImmVertex(const ClipVertexData &vert, SoftwareDrawEngi
 		break;
 	}
 
-	uint32_t vertTypeID = GetVertTypeID(gstate.vertType | GE_VTYPE_POS_FLOAT, gstate.getUVGenMode(), true);
+	// Hm, shouldn't we mask away the position bits of the vertType?
+	uint32_t vertTypeID = GetVertTypeID(gstate.vertType | GE_VTYPE_POS_FLOAT, gstate.getUVGenMode());
 	// This now processes the step with shared logic, given the existing data_.
 	isImmDraw_ = true;
 	SubmitPrimitive(nullptr, nullptr, GE_PRIM_KEEP_PREVIOUS, 0, vertTypeID, nullptr, drawEngine);

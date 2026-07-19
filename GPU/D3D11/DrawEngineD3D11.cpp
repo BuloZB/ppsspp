@@ -71,7 +71,6 @@ DrawEngineD3D11::DrawEngineD3D11(Draw::DrawContext *draw, ID3D11Device *device, 
 		rasterCache_(4) {
 	device1_ = (ID3D11Device1 *)draw->GetNativeObject(Draw::NativeObject::DEVICE_EX);
 	context1_ = (ID3D11DeviceContext1 *)draw->GetNativeObject(Draw::NativeObject::CONTEXT_EX);
-	decOptions_.expandAllWeightsToFloat = true;
 	decOptions_.expand8BitNormalsToFloat = true;
 
 	InitDeviceObjects();
@@ -85,9 +84,6 @@ void DrawEngineD3D11::InitDeviceObjects() {
 	pushVerts_ = new PushBufferD3D11(device_, VERTEX_PUSH_SIZE, D3D11_BIND_VERTEX_BUFFER);
 	pushInds_ = new PushBufferD3D11(device_, INDEX_PUSH_SIZE, D3D11_BIND_INDEX_BUFFER);
 
-	tessDataTransferD3D11 = new TessellationDataTransferD3D11(context_, device_);
-	tessDataTransfer = tessDataTransferD3D11;
-
 	draw_->SetInvalidationCallback(std::bind(&DrawEngineD3D11::Invalidate, this, std::placeholders::_1));
 }
 
@@ -97,9 +93,6 @@ void DrawEngineD3D11::DestroyDeviceObjects() {
 	}
 
 	ClearInputLayoutMap();
-	delete tessDataTransferD3D11;
-	tessDataTransferD3D11 = nullptr;
-	tessDataTransfer = nullptr;
 	delete pushVerts_;
 	delete pushInds_;
 	pushVerts_ = nullptr;
@@ -276,15 +269,6 @@ void DrawEngineD3D11::Flush() {
 	if (!numDrawVerts_) {
 		return;
 	}
-	bool textureNeedsApply = false;
-	if (gstate_c.IsDirty(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS) && !gstate.isModeClear() && gstate.isTextureMapEnabled()) {
-		textureCache_->SetTexture();
-		gstate_c.Clean(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS);
-		textureNeedsApply = true;
-	} else if (gstate.getTextureAddress(0) == (gstate.getFrameBufRawAddress() | 0x04000000)) {
-		// This catches the case of clearing a texture. (#10957)
-		gstate_c.Dirty(DIRTY_TEXTURE_IMAGE);
-	}
 
 	// This is not done on every drawcall, we collect vertex data
 	// until critical state changes. That's when we draw (flush).
@@ -292,8 +276,7 @@ void DrawEngineD3D11::Flush() {
 	GEPrimitiveType prim = prevPrim_;
 
 	// Always use software for flat shading to fix the provoking index.
-	bool tess = gstate_c.submitType == SubmitType::HW_BEZIER || gstate_c.submitType == SubmitType::HW_SPLINE;
-	bool useHWTransform = CanUseHardwareTransform(prim) && (tess || gstate.getShadeMode() != GE_SHADE_FLAT);
+	bool useHWTransform = CanUseHardwareTransform(prim) && gstate.getShadeMode() != GE_SHADE_FLAT;
 	if (clipInfoFlags_ & ClipInfoFlags::Valid) {
 		if (clipInfoFlags_ & ClipInfoFlags::SoftClipCull) {
 			useHWTransform = false;
@@ -303,6 +286,9 @@ void DrawEngineD3D11::Flush() {
 		ClipInfoFlags changed = (ClipInfoFlags)((u32)clipInfoFlags_ ^ (u32)lastClipInfoFlags_);
 		if (changed & (ClipInfoFlags::DepthClampFragment | ClipInfoFlags::MinMaxZDiscard)) {
 			gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE | DIRTY_RASTER_STATE);
+		}
+		if (changed & ClipInfoFlags::FlatZ) {
+			gstate_c.Dirty(DIRTY_TEXTURE_PARAMS);
 		}
 		lastClipInfoFlags_ = clipInfoFlags_;
 	}
@@ -321,7 +307,7 @@ void DrawEngineD3D11::Flush() {
 		bool useElements;
 		DecodeVerts(dec_, decoded_);
 		DecodeIndsAndGetData(&prim, &vertexCount, &maxIndex, &useElements, false);
-		gpuStats.perFrame.numUncachedVertsDrawn += vertexCount;
+		gpuStats.perFrame.numVertsDrawn += vertexCount;
 
 		bool hasColor = (lastVType_ & GE_VTYPE_COL_MASK) != GE_VTYPE_COL_NONE;
 		if (gstate.isModeThrough()) {
@@ -330,12 +316,13 @@ void DrawEngineD3D11::Flush() {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && ((hasColor && (gstate.materialupdate & 1)) || gstate.getMaterialAmbientA() == 255) && (!gstate.isLightingEnabled() || gstate.getAmbientA() == 255);
 		}
 
-		if (textureNeedsApply) {
-			gstate_c.dstSquared = false;
-			textureCache_->ApplyTexture();
-			if (gstate_c.dstSquared) {
-				gstate_c.Dirty(DIRTY_BLEND_STATE);
-			}
+		if (gstate_c.IsDirty(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS) && !gstate.isModeClear() && gstate.isTextureMapEnabled()) {
+			gstate_c.Clean(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS);
+			TextureApplyResult textureResult = textureCache_->ApplyTexture(true);
+			textureCache_->ApplySampler(textureResult, clipInfoFlags_ & ClipInfoFlags::FlatZ, false);
+		} else if (gstate.getTextureAddress(0) == (gstate.getFrameBufRawAddress() | 0x04000000)) {
+			// This catches the case of clearing a texture. (#10957)
+			gstate_c.Dirty(DIRTY_TEXTURE_IMAGE);
 		}
 
 		// Need to ApplyDrawState after ApplyTexture because depal can launch a render pass and that wrecks the state.
@@ -344,12 +331,12 @@ void DrawEngineD3D11::Flush() {
 
 		D3D11VertexShader *vshader;
 		D3D11FragmentShader *fshader;
-		shaderManager_->GetShaders(prim, dec_->VertexType(), &vshader, &fshader, pipelineState_, useHWTransform, useHWTessellation_, decOptions_.expandAllWeightsToFloat, applySkinInDecode_, clipInfoFlags_);
+		shaderManager_->GetShaders(prim, dec_->VertexType(), &vshader, &fshader, pipelineState_, useHWTransform, clipInfoFlags_);
 		ID3D11InputLayout *inputLayout;
 		SetupDecFmtForDraw(vshader, dec_->GetDecVtxFmt(), dec_->VertexType(), &inputLayout);
 		context_->PSSetShader(fshader->GetShader(), nullptr, 0);
 		context_->VSSetShader(vshader->GetShader(), nullptr, 0);
-		shaderManager_->UpdateUniforms(framebufferManager_->UseBufferedRendering());
+		shaderManager_->UpdateUniforms(framebufferManager_->UseBufferedRendering(), false);
 		shaderManager_->BindUniforms();
 
 		context_->IASetInputLayout(inputLayout);
@@ -391,15 +378,7 @@ void DrawEngineD3D11::Flush() {
 		}
 	} else {
 		PROFILE_THIS_SCOPE("soft");
-		const VertexDecoder *swDec = dec_;
-		if (swDec->nweights != 0) {
-			u32 withSkinning = lastVType_ | (1 << 26);
-			if (withSkinning != lastVType_) {
-				swDec = GetVertexDecoder(withSkinning);
-			}
-		}
-
-		DecodeVerts(swDec, decoded_);
+		DecodeVerts(dec_, decoded_);
 		int vertexCount = DecodeInds();
 
 		bool hasColor = (lastVType_ & GE_VTYPE_COL_MASK) != GE_VTYPE_COL_NONE;
@@ -409,7 +388,6 @@ void DrawEngineD3D11::Flush() {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && ((hasColor && (gstate.materialupdate & 1)) || gstate.getMaterialAmbientA() == 255) && (!gstate.isLightingEnabled() || gstate.getAmbientA() == 255);
 		}
 
-		gpuStats.perFrame.numUncachedVertsDrawn += vertexCount;
 		prim = IndexGenerator::GeneralPrim((GEPrimitiveType)drawInds_[0].prim);
 		VERBOSE_LOG(Log::G3D, "Flush prim %i SW! %i verts in one go", prim, vertexCount);
 
@@ -425,7 +403,19 @@ void DrawEngineD3D11::Flush() {
 		// We could piggyback on the viewport transform below, but it gets complicated since it's different per-backend. Which we really
 		// should clean up one day...
 		if (useDepthRaster_) {
-			DepthRasterPredecoded(prim, decoded_, numDecodedVerts_, swDec, vertexCount);
+			DepthRasterPredecoded(prim, decoded_, numDecodedVerts_, dec_, vertexCount);
+		}
+
+		bool textureNeedsApply = false;
+		TextureApplyResult textureResult;
+		if (gstate_c.IsDirty(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS) && !gstate.isModeClear() && gstate.isTextureMapEnabled()) {
+			gstate_c.Clean(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS);
+			gstate_c.dstSquared = false;
+			textureResult = textureCache_->ApplyTexture(true);
+			textureNeedsApply = true;
+		} else if (gstate.getTextureAddress(0) == (gstate.getFrameBufRawAddress() | 0x04000000)) {
+			// This catches the case of clearing a texture. (#10957)
+			gstate_c.Dirty(DIRTY_TEXTURE_IMAGE);
 		}
 
 		SoftwareTransformResult result{};
@@ -436,17 +426,13 @@ void DrawEngineD3D11::Flush() {
 		params.transformedExpanded = transformedExpanded_;
 		params.allowClear = true;
 		params.allowSeparateAlphaClear = false;  // D3D11 doesn't support separate alpha clears
+		params.clipInfoFlags = clipInfoFlags_;
 
-		const SoftwareTransformAction action = RunSoftwareTransform(params, prim, swDec->VertexType(), swDec->GetDecVtxFmt(), numDecodedVerts_, VERTEX_BUFFER_MAX, vertexCount, inds, RemainingIndices(inds), &result);
-
-		if (result.setSafeSize)
-			framebufferManager_->SetSafeSize(result.safeWidth, result.safeHeight);
+		const SoftwareTransformAction action = RunSoftwareTransform(params, prim, dec_->VertexType(), dec_->GetDecVtxFmt(), numDecodedVerts_, VERTEX_BUFFER_MAX, vertexCount, inds, RemainingIndices(inds), &result);
 
 		// TODO: This should be after BuildDrawingParams!
 		if (textureNeedsApply) {
-			gstate_c.pixelMapped = result.pixelMapped;
-			textureCache_->ApplyTexture();
-			gstate_c.pixelMapped = false;
+			textureCache_->ApplySampler(textureResult, clipInfoFlags_ & ClipInfoFlags::FlatZ, result.pixelMapped);
 		}
 
 		// Need to ApplyDrawState after ApplyTexture because depal can launch a render pass and that wrecks the state.
@@ -456,10 +442,10 @@ void DrawEngineD3D11::Flush() {
 		if (action == SW_DRAW_INDEXED) {
 			D3D11VertexShader *vshader;
 			D3D11FragmentShader *fshader;
-			shaderManager_->GetShaders(prim, swDec->VertexType(), &vshader, &fshader, pipelineState_, false, false, decOptions_.expandAllWeightsToFloat, true, clipInfoFlags_);
+			shaderManager_->GetShaders(prim, dec_->VertexType(), &vshader, &fshader, pipelineState_, false, clipInfoFlags_);
 			context_->PSSetShader(fshader->GetShader(), nullptr, 0);
 			context_->VSSetShader(vshader->GetShader(), nullptr, 0);
-			shaderManager_->UpdateUniforms(framebufferManager_->UseBufferedRendering());
+			shaderManager_->UpdateUniforms(framebufferManager_->UseBufferedRendering(), result.pixelMapped);
 			shaderManager_->BindUniforms();
 
 			// We really do need a vertex layout for each vertex shader (or at least check its ID bits for what inputs it uses)!
@@ -488,6 +474,7 @@ void DrawEngineD3D11::Flush() {
 			pushInds_->EndPush(context_);
 			context_->IASetIndexBuffer(pushInds_->Buf(), DXGI_FORMAT_R16_UINT, iOffset);
 			context_->DrawIndexed(result.drawIndexCount, 0, 0);
+			gpuStats.perFrame.numVertsDrawn += result.drawIndexCount;
 		} else if (action == SW_CLEAR) {
 			u32 clearColor = result.color;
 			float clearDepth = result.depth;
@@ -514,96 +501,4 @@ void DrawEngineD3D11::Flush() {
 	ResetAfterDrawInline();
 	framebufferManager_->SetColorUpdated(gstate_c.skipDrawReason);
 	gpuCommon_->NotifyFlush();
-}
-
-TessellationDataTransferD3D11::TessellationDataTransferD3D11(ID3D11DeviceContext *context, ID3D11Device *device)
-	: context_(context), device_(device) {
-	desc.Usage = D3D11_USAGE_DYNAMIC;
-	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-	desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-	desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-}
-
-TessellationDataTransferD3D11::~TessellationDataTransferD3D11() {
-}
-
-void TessellationDataTransferD3D11::SendDataToShader(const SimpleVertex *const *points, int size_u, int size_v, u32 vertType, const Spline::Weight2D &weights) {
-	struct TessData {
-		float pos[3]; float pad1;
-		float uv[2]; float pad2[2];
-		float color[4];
-	};
-
-	int size = size_u * size_v;
-
-	if (prevSize < size || !buf[0]) {
-		prevSize = size;
-		buf[0].Reset();
-		view[0].Reset();
-
-		desc.ByteWidth = size * sizeof(TessData);
-		desc.StructureByteStride = sizeof(TessData);
-		device_->CreateBuffer(&desc, nullptr, &buf[0]);
-		if (buf[0])
-			device_->CreateShaderResourceView(buf[0].Get(), nullptr, &view[0]);
-		if (!buf[0] || !view[0])
-			return;
-		context_->VSSetShaderResources(0, 1, view[0].GetAddressOf());
-	}
-	D3D11_MAPPED_SUBRESOURCE map{};
-	HRESULT hr = context_->Map(buf[0].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
-	if (FAILED(hr))
-		return;
-	uint8_t *data = (uint8_t *)map.pData;
-
-	float *pos = (float *)(data);
-	float *tex = (float *)(data + offsetof(TessData, uv));
-	float *col = (float *)(data + offsetof(TessData, color));
-	int stride = sizeof(TessData) / sizeof(float);
-
-	CopyControlPoints(pos, tex, col, stride, stride, stride, points, size, vertType);
-
-	context_->Unmap(buf[0].Get(), 0);
-
-	using Spline::Weight;
-
-	// Weights U
-	if (prevSizeWU < weights.size_u || !buf[1]) {
-		prevSizeWU = weights.size_u;
-		buf[1].Reset();
-		view[1].Reset();
-
-		desc.ByteWidth = weights.size_u * sizeof(Weight);
-		desc.StructureByteStride = sizeof(Weight);
-		device_->CreateBuffer(&desc, nullptr, &buf[1]);
-		if (buf[1])
-			device_->CreateShaderResourceView(buf[1].Get(), nullptr, &view[1]);
-		if (!buf[1] || !view[1])
-			return;
-		context_->VSSetShaderResources(1, 1, view[1].GetAddressOf());
-	}
-	hr = context_->Map(buf[1].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
-	if (SUCCEEDED(hr))
-		memcpy(map.pData, weights.u, weights.size_u * sizeof(Weight));
-	context_->Unmap(buf[1].Get(), 0);
-
-	// Weights V
-	if (prevSizeWV < weights.size_v) {
-		prevSizeWV = weights.size_v;
-		buf[2].Reset();
-		view[2].Reset();
-
-		desc.ByteWidth = weights.size_v * sizeof(Weight);
-		desc.StructureByteStride = sizeof(Weight);
-		device_->CreateBuffer(&desc, nullptr, &buf[2]);
-		if (buf[2])
-			device_->CreateShaderResourceView(buf[2].Get(), nullptr, &view[2]);
-		if (!buf[2] || !view[2])
-			return;
-		context_->VSSetShaderResources(2, 1, view[2].GetAddressOf());
-	}
-	hr = context_->Map(buf[2].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
-	if (SUCCEEDED(hr))
-		memcpy(map.pData, weights.v, weights.size_v * sizeof(Weight));
-	context_->Unmap(buf[2].Get(), 0);
 }

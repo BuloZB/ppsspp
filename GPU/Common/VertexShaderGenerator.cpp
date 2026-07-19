@@ -32,54 +32,6 @@
 
 #define WRITE(p, ...) p.F(__VA_ARGS__)
 
-static const char * const boneWeightAttrDecl[9] = {
-	"#ERROR#",
-	"attribute mediump float w1;\n",
-	"attribute mediump vec2 w1;\n",
-	"attribute mediump vec3 w1;\n",
-	"attribute mediump vec4 w1;\n",
-	"attribute mediump vec4 w1;\nattribute mediump float w2;\n",
-	"attribute mediump vec4 w1;\nattribute mediump vec2 w2;\n",
-	"attribute mediump vec4 w1;\nattribute mediump vec3 w2;\n",
-	"attribute mediump vec4 w1, w2;\n",
-};
-
-static const char * const boneWeightInDecl[9] = {
-	"#ERROR#",
-	"in mediump float w1;\n",
-	"in mediump vec2 w1;\n",
-	"in mediump vec3 w1;\n",
-	"in mediump vec4 w1;\n",
-	"in mediump vec4 w1;\nin mediump float w2;\n",
-	"in mediump vec4 w1;\nin mediump vec2 w2;\n",
-	"in mediump vec4 w1;\nin mediump vec3 w2;\n",
-	"in mediump vec4 w1, w2;\n",
-};
-
-const char *boneWeightAttrDeclHLSL[9] = {
-	"#ERROR boneWeightAttrDecl#\n",
-	"float  a_w1:TEXCOORD1;\n",
-	"vec2 a_w1:TEXCOORD1;\n",
-	"vec3 a_w1:TEXCOORD1;\n",
-	"vec4 a_w1:TEXCOORD1;\n",
-	"vec4 a_w1:TEXCOORD1;\n  float a_w2:TEXCOORD2;\n",
-	"vec4 a_w1:TEXCOORD1;\n  vec2 a_w2:TEXCOORD2;\n",
-	"vec4 a_w1:TEXCOORD1;\n  vec3 a_w2:TEXCOORD2;\n",
-	"vec4 a_w1:TEXCOORD1;\n  vec4 a_w2:TEXCOORD2;\n",
-};
-
-const char *boneWeightAttrInitHLSL[9] = {
-	"  #ERROR#\n",
-	"  vec4 w1 = vec4(In.a_w1, 0.0, 0.0, 0.0);\n",
-	"  vec4 w1 = vec4(In.a_w1.xy, 0.0, 0.0);\n",
-	"  vec4 w1 = vec4(In.a_w1.xyz, 0.0);\n",
-	"  vec4 w1 = In.a_w1;\n",
-	"  vec4 w1 = In.a_w1;\n  vec4 w2 = vec4(In.a_w2, 0.0, 0.0, 0.0);\n",
-	"  vec4 w1 = In.a_w1;\n  vec4 w2 = vec4(In.a_w2.xy, 0.0, 0.0);\n",
-	"  vec4 w1 = In.a_w1;\n  vec4 w2 = vec4(In.a_w2.xyz, 0.0);\n",
-	"  vec4 w1 = In.a_w1;\n  vec4 w2 = In.a_w2;\n",
-};
-
 // Depth range and viewport
 //
 // After the multiplication with the projection matrix, we have a 4D vector in clip space.
@@ -111,18 +63,6 @@ const char *boneWeightAttrInitHLSL[9] = {
 // TODO: Skip all this if we can actually get a 16-bit depth buffer along with stencil, which
 // is a bit of a rare configuration, although quite common on mobile.
 
-static const char * const boneWeightDecl[9] = {
-	"#ERROR#",
-	"layout(location = 3) in float w1;\n",
-	"layout(location = 3) in vec2 w1;\n",
-	"layout(location = 3) in vec3 w1;\n",
-	"layout(location = 3) in vec4 w1;\n",
-	"layout(location = 3) in vec4 w1;\nlayout(location = 4) in float w2;\n",
-	"layout(location = 3) in vec4 w1;\nlayout(location = 4) in vec2 w2;\n",
-	"layout(location = 3) in vec4 w1;\nlayout(location = 4) in vec3 w2;\n",
-	"layout(location = 3) in vec4 w1;\nlayout(location = 4) in vec4 w2;\n",
-};
-
 bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguageDesc &compat, Draw::Bugs bugs, uint32_t *attrMask, uint64_t *uniformMask, VertexShaderFlags *vertexShaderFlags, std::string *errorString) {
 	*attrMask = 0;
 	*uniformMask = 0;
@@ -134,7 +74,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 	const bool isModeThrough = id.Bit(VS_BIT_IS_THROUGH);
 	const bool useHWTransform = id.Bit(VS_BIT_USE_HW_TRANSFORM);
 
-	const bool clipEnable = id.Bit(VS_BIT_CLIP_ENABLE) && !isModeThrough;  // this is the PSP clip flag, which has some various consequences.
 	const bool clipNearPlane = gstate_c.Use(GPU_USE_CLIP_DISTANCE) && useHWTransform;
 	const bool clipMinMax = gstate_c.Use(GPU_USE_CLIP_DISTANCE) && !isModeThrough;  // If clip planes are available, we want to use them for min/max. We skip the min/max culling in software transform (not yet implemented).
 
@@ -170,7 +109,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 
 	ShaderWriter p(buffer, compat, ShaderStage::Vertex, extensions);
 
-	p.F("// %s\n", VertexShaderDesc(id).c_str());
+	p.C("// %").W(id.Description()).endl();
 
 	bool lmode = id.Bit(VS_BIT_LMODE);
 
@@ -182,18 +121,16 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 	bool doShadeMapping = uvGenMode == GE_TEXMAP_ENVIRONMENT_MAP;
 
 	bool flatBug = bugs.Has(Draw::Bugs::BROKEN_FLAT_IN_SHADER) && g_Config.bVendorBugChecksEnabled;
-	bool needsZWHack = bugs.Has(Draw::Bugs::EQUAL_WZ_CORRUPTS_DEPTH) && g_Config.bVendorBugChecksEnabled;
 	bool nanBug = bugs.Has(Draw::Bugs::BROKEN_NAN_IN_CONDITIONAL) && g_Config.bVendorBugChecksEnabled;
 
 	bool doFlatShading = id.Bit(VS_BIT_FLATSHADE) && !flatBug;
 
-	bool hasColor = id.Bit(VS_BIT_HAS_COLOR) || !useHWTransform;
+	bool hasColor = id.Bit(VS_BIT_HAS_COLOR);
 	bool hasNormal = id.Bit(VS_BIT_HAS_NORMAL) && useHWTransform;
 	bool hasTexcoord = id.Bit(VS_BIT_HAS_TEXCOORD) || !useHWTransform;
 	bool flipNormal = id.Bit(VS_BIT_NORM_REVERSE);
 	int ls0 = id.Bits(VS_BIT_LS0, 2);
 	int ls1 = id.Bits(VS_BIT_LS1, 2);
-	bool enableBones = id.Bit(VS_BIT_ENABLE_BONES) && useHWTransform;
 	bool enableLighting = id.Bit(VS_BIT_LIGHTING_ENABLE);
 	int matUpdate = id.Bits(VS_BIT_MATERIAL_UPDATE, 3);
 
@@ -202,25 +139,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		*errorString = "Light ubershader requires bitwise ops in shader language";
 		return false;
 	}
-
-	// Apparently we don't support bezier/spline together with bones.
-	bool doBezier = id.Bit(VS_BIT_BEZIER) && !enableBones && useHWTransform;
-	bool doSpline = id.Bit(VS_BIT_SPLINE) && !enableBones && useHWTransform;
-	if (doBezier || doSpline) {
-		if (!hasNormal) {
-			// Bad usage.
-			*errorString = "Invalid flags - tess requires normal.";
-			return false;
-		}
-		if (compat.texelFetch == nullptr) {
-			*errorString = "Tess not supported on this shader language version";
-			return false;
-		}
-	}
-	bool hasColorTess = id.Bit(VS_BIT_HAS_COLOR_TESS);
-	bool hasTexcoordTess = id.Bit(VS_BIT_HAS_TEXCOORD_TESS);
-	bool hasNormalTess = id.Bit(VS_BIT_HAS_NORMAL_TESS);
-	bool flipNormalTess = id.Bit(VS_BIT_NORM_REVERSE_TESS);
 
 	// Should we do the min/max discard in the shader and/or or use depth clamping?
 	// In both cases we need to just forward
@@ -243,11 +161,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		}
 	}
 
-	int numBoneWeights = 0;
-	int boneWeightScale = id.Bits(VS_BIT_WEIGHT_FMTSCALE, 2);
-	if (enableBones) {
-		numBoneWeights = 1 + id.Bits(VS_BIT_BONES, 3);
-	}
 	bool texCoordInVec3 = false;
 
 	const char *minZClipPlaneSuffix = "[0]";
@@ -263,12 +176,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		WRITE(p, "layout (std140, set = 0, binding = %d) uniform baseVars {\n%s};\n", DRAW_BINDING_DYNUBO_BASE, ub_baseStr);
 		if (enableLighting || doShadeMapping)
 			WRITE(p, "layout (std140, set = 0, binding = %d) uniform lightVars {\n%s};\n", DRAW_BINDING_DYNUBO_LIGHT, ub_vs_lightsStr);
-		if (enableBones)
-			WRITE(p, "layout (std140, set = 0, binding = %d) uniform boneVars {\n%s};\n", DRAW_BINDING_DYNUBO_BONE, ub_vs_bonesStr);
-
-		if (enableBones) {
-			WRITE(p, "%s", boneWeightDecl[numBoneWeights]);
-		}
 
 		if (useHWTransform)
 			WRITE(p, "layout (location = %d) in vec3 position;\n", (int)PspAttributeLocation::POSITION);
@@ -288,7 +195,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 				WRITE(p, "layout (location = %d) in vec2 texcoord;\n", (int)PspAttributeLocation::TEXCOORD);
 			}
 		}
-		if (hasColor) {
+		if (hasColor || !useHWTransform) {
 			WRITE(p, "layout (location = %d) in vec4 color0;\n", (int)PspAttributeLocation::COLOR0);
 			if (lmode && !useHWTransform)  // only software transform supplies color1 as vertex data
 				WRITE(p, "layout (location = %d) in vec3 color1;\n", (int)PspAttributeLocation::COLOR1);
@@ -312,21 +219,14 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		// Note: These two share some code after this hellishly large if/else.
 		WRITE(p, "cbuffer base : register(b0) {\n%s};\n", ub_baseStr);
 		WRITE(p, "cbuffer lights: register(b1) {\n%s};\n", ub_vs_lightsStr);
-		WRITE(p, "cbuffer bones : register(b2) {\n%s};\n", ub_vs_bonesStr);
 
 		// And the "varyings".
 		if (useHWTransform) {
-			WRITE(p, "struct VS_IN {                              \n");
-			if ((doSpline || doBezier) && compat.shaderLanguage == HLSL_D3D11) {
-				WRITE(p, "  uint instanceId : SV_InstanceID;\n");
-			}
-			if (enableBones) {
-				WRITE(p, "  %s", boneWeightAttrDeclHLSL[numBoneWeights]);
-			}
+			WRITE(p, "struct VS_IN {\n");
 			if (hasTexcoord) {
 				WRITE(p, "  vec2 texcoord : TEXCOORD0;\n");
 			}
-			if (hasColor) {
+			if (hasColor || !useHWTransform) {
 				WRITE(p, "  vec4 color0 : COLOR0;\n");
 			}
 			if (hasNormal) {
@@ -345,7 +245,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 					WRITE(p, "  vec2 texcoord : TEXCOORD0;\n");
 				}
 			}
-			if (hasColor) {
+			if (hasColor || !useHWTransform) {
 				WRITE(p, "  vec4 color0 : COLOR0;\n");
 			}
 			// only software transform supplies color1 as vertex data
@@ -358,21 +258,18 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 
 		WRITE(p, "struct VS_OUT {\n");
 		WRITE(p, "  vec3 v_texcoord : TEXCOORD0;\n");
-		const char *colorInterpolation = doFlatShading && compat.shaderLanguage == HLSL_D3D11 ? "nointerpolation " : "";
+		const char *colorInterpolation = (doFlatShading && compat.shaderLanguage == HLSL_D3D11) ? "nointerpolation " : "";
 		WRITE(p, "  %svec4 v_color0    : COLOR0;\n", colorInterpolation);
 		if (lmode) {
-			WRITE(p, "  vec3 v_color1    : COLOR1;\n");
+			WRITE(p, "  %svec3 v_color1    : COLOR1;\n", colorInterpolation);
 		}
 
 		WRITE(p, "  float v_fogdepth : TEXCOORD1;\n");
 		if (fsMinmaxDiscard || fsDepthClamp) {
-			WRITE(p, "  vec2 v_zw : TEXCOORD2;\n");
+			WRITE(p, "  highp vec2 v_zw : TEXCOORD2;\n");
 		}
 		// gl_Position must be last for D3D11.
 		WRITE(p, "  vec4 gl_Position   : SV_Position;\n");
-		minZClipPlaneSuffix = ".x";
-		maxZClipPlaneSuffix = ".y";
-		zClipPlaneSuffix = ".z";
 		if (clipMinMax && clipNearPlane) {
 			WRITE(p, "  float3 gl_ClipDistance : SV_ClipDistance;\n");
 		} else if (clipMinMax) {
@@ -385,17 +282,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		}
 		WRITE(p, "};\n");
 	} else {
-		// Non-Vulkan GLSL.
-		if (enableBones) {
-			const char * const * boneWeightDecl = boneWeightAttrDecl;
-			if (!strcmp(compat.attribute, "in")) {
-				boneWeightDecl = boneWeightInDecl;
-			}
-			WRITE(p, "%s", boneWeightDecl[numBoneWeights]);
-			*attrMask |= 1 << ATTR_W1;
-			if (numBoneWeights >= 5)
-				*attrMask |= 1 << ATTR_W2;
-		}
+		// Non-Vulkan GLSL
 
 		if (useHWTransform)
 			WRITE(p, "%s vec3 position;\n", compat.attribute);
@@ -422,7 +309,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			*attrMask |= 1 << ATTR_TEXCOORD;
 		}
 
-		if (hasColor) {
+		if (hasColor || !useHWTransform) {
 			WRITE(p, "%s lowp vec4 color0;\n", compat.attribute);
 			*attrMask |= 1 << ATTR_COLOR0;
 			if (lmode && !useHWTransform) { // only software transform supplies color1 as vertex data
@@ -433,7 +320,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 
 		WRITE(p, "uniform vec4 u_xywh;\n");
 		WRITE(p, "uniform float u_NaN;\n");
-		*uniformMask |= DIRTY_PROJTHROUGHMATRIX;
+		*uniformMask |= DIRTY_FRAMEBUFFER_DIM;
 
 		WRITE(p, "uniform vec2 u_minZmaxZ;\n");
 		*uniformMask |= DIRTY_RASTER_OFFSET;  // this flag is shared with raster offset.
@@ -458,12 +345,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			if (doTextureTransform) {
 				WRITE(p, "uniform mediump mat4 u_texmtx;\n");
 				*uniformMask |= DIRTY_TEXMATRIX;
-			}
-			if (enableBones) {
-				for (int i = 0; i < numBoneWeights; i++) {
-					WRITE(p, "uniform mat4 u_bone%i;\n", i);
-					*uniformMask |= DIRTY_BONEMATRIX0 << i;
-				}
 			}
 			WRITE(p, "uniform vec4 u_uvscaleoffset;\n");
 			*uniformMask |= DIRTY_UVSCALEOFFSET;
@@ -516,7 +397,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			WRITE(p, "uniform lowp float u_scaleY;\n");
 		}
 
-		if (useHWTransform || !hasColor) {
+		if (useHWTransform) {
 			WRITE(p, "uniform lowp vec4 u_matambientalpha;\n");  // matambient + matalpha
 			*uniformMask |= DIRTY_MATAMBIENTALPHA;
 		}
@@ -542,166 +423,10 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		}
 	}
 
-	// Hardware tessellation
-	if (doBezier || doSpline) {
-		*uniformMask |= DIRTY_BEZIERSPLINE;
-
-		if (compat.shaderLanguage == GLSL_VULKAN) {
-			WRITE(p, "struct TessData {\n");
-			WRITE(p, "  vec4 pos;\n");
-			WRITE(p, "  vec4 tex;\n");
-			WRITE(p, "  vec4 col;\n");
-			WRITE(p, "};\n");
-			WRITE(p, "layout (std430, set = 0, binding = %d) readonly buffer s_tess_data {\n", DRAW_BINDING_TESS_STORAGE_BUF);
-			WRITE(p, "  TessData tess_data[];\n");
-			WRITE(p, "};\n");
-
-			WRITE(p, "struct TessWeight {\n");
-			WRITE(p, "  vec4 basis;\n");
-			WRITE(p, "  vec4 deriv;\n");
-			WRITE(p, "};\n");
-			WRITE(p, "layout (std430, set = 0, binding = %d) readonly buffer s_tess_weights_u {\n", DRAW_BINDING_TESS_STORAGE_BUF_WU);
-			WRITE(p, "  TessWeight tess_weights_u[];\n");
-			WRITE(p, "};\n");
-			WRITE(p, "layout (std430, set = 0, binding = %d) readonly buffer s_tess_weights_v {\n", DRAW_BINDING_TESS_STORAGE_BUF_WV);
-			WRITE(p, "  TessWeight tess_weights_v[];\n");
-			WRITE(p, "};\n");
-		} else if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
-			WRITE(p, "uniform sampler2D u_tess_points;\n"); // Control Points
-			WRITE(p, "uniform sampler2D u_tess_weights_u;\n");
-			WRITE(p, "uniform sampler2D u_tess_weights_v;\n");
-
-			WRITE(p, "uniform int u_spline_counts;\n");
-		} else if (compat.shaderLanguage == HLSL_D3D11) {
-			WRITE(p, "struct TessData {\n");
-			WRITE(p, "  vec3 pos; float pad1;\n");
-			WRITE(p, "  vec2 tex; vec2 pad2;\n");
-			WRITE(p, "  vec4 col;\n");
-			WRITE(p, "};\n");
-			WRITE(p, "StructuredBuffer<TessData> tess_data : register(t0);\n");
-
-			WRITE(p, "struct TessWeight {\n");
-			WRITE(p, "  vec4 basis;\n");
-			WRITE(p, "  vec4 deriv;\n");
-			WRITE(p, "};\n");
-			WRITE(p, "StructuredBuffer<TessWeight> tess_weights_u : register(t1);\n");
-			WRITE(p, "StructuredBuffer<TessWeight> tess_weights_v : register(t2);\n");
-		}
-
-		const char *init[3] = { "0.0, 0.0", "0.0, 0.0, 0.0", "0.0, 0.0, 0.0, 0.0" };
-		for (int i = 2; i <= 4; i++) {
-			// Define 3 types vec2, vec3, vec4
-			WRITE(p, "vec%d tess_sample(in vec%d points[16], mat4 weights) {\n", i, i);
-			WRITE(p, "  vec%d pos = vec%d(%s);\n", i, i, init[i - 2]);
-			for (int v = 0; v < 4; ++v) {
-				for (int u = 0; u < 4; ++u) {
-					WRITE(p, "  pos += weights[%i][%i] * points[%i];\n", v, u, v * 4 + u);
-				}
-			}
-			WRITE(p, "  return pos;\n");
-			WRITE(p, "}\n");
-		}
-
-		if (ShaderLanguageIsOpenGL(compat.shaderLanguage) && compat.glslVersionNumber < 130) { // For glsl version 1.10
-			WRITE(p, "mat4 outerProduct(vec4 u, vec4 v) {\n");
-			WRITE(p, "  return mat4(u * v[0], u * v[1], u * v[2], u * v[3]);\n");
-			WRITE(p, "}\n");
-		} else if (compat.shaderLanguage == HLSL_D3D11) {
-			WRITE(p, "mat4 outerProduct(vec4 u, vec4 v) {\n");
-			WRITE(p, "  return mul((float4x1)v, (float1x4)u);\n");
-			WRITE(p, "}\n");
-		}
-
-		WRITE(p, "struct Tess {\n");
-		WRITE(p, "  vec3 pos;\n");
-		WRITE(p, "  vec2 tex;\n");
-		WRITE(p, "  vec4 col;\n");
-		if (hasNormalTess)
-			WRITE(p, "  vec3 nrm;\n");
-		WRITE(p, "};\n");
-
-		if (compat.shaderLanguage == HLSL_D3D11) {
-			WRITE(p, "void tessellate(in VS_IN In, out Tess tess) {\n");
-			WRITE(p, "  vec3 position = In.position;\n");
-			WRITE(p, "  vec3 normal = In.normal;\n");
-		} else {
-			WRITE(p, "void tessellate(out Tess tess) {\n");
-		}
-		WRITE(p, "  ivec2 point_pos = ivec2(position.z, normal.z)%s;\n", doBezier ? " * 3" : "");
-		WRITE(p, "  ivec2 weight_idx = ivec2(position.xy);\n");
-
-		// Load 4x4 control points
-		WRITE(p, "  vec3 _pos[16];\n");
-		WRITE(p, "  vec2 _tex[16];\n");
-		WRITE(p, "  vec4 _col[16];\n");
-		if (compat.coefsFromBuffers) {
-			WRITE(p, "  int index;\n");
-			for (int i = 0; i < 4; i++) {
-				for (int j = 0; j < 4; j++) {
-					WRITE(p, "  index = (%i + point_pos.y) * int(u_spline_counts) + (%i + point_pos.x);\n", i, j);
-					WRITE(p, "  _pos[%i] = tess_data[index].pos.xyz;\n", i * 4 + j);
-					if (hasTexcoordTess)
-						WRITE(p, "  _tex[%i] = tess_data[index].tex.xy;\n", i * 4 + j);
-					if (hasColorTess)
-						WRITE(p, "  _col[%i] = tess_data[index].col;\n", i * 4 + j);
-				}
-			}
-
-			// Basis polynomials as weight coefficients
-			WRITE(p, "  vec4 basis_u = tess_weights_u[weight_idx.x].basis;\n");
-			WRITE(p, "  vec4 basis_v = tess_weights_v[weight_idx.y].basis;\n");
-			WRITE(p, "  mat4 basis = outerProduct(basis_u, basis_v);\n");
-		} else {
-			WRITE(p, "  int index_u, index_v;\n");
-			for (int i = 0; i < 4; i++) {
-				for (int j = 0; j < 4; j++) {
-					WRITE(p, "  index_u = (%i + point_pos.x);\n", j);
-					WRITE(p, "  index_v = (%i + point_pos.y);\n", i);
-					WRITE(p, "  _pos[%i] = %s(u_tess_points, ivec2(index_u, index_v), 0).xyz;\n", i * 4 + j, compat.texelFetch);
-					if (hasTexcoordTess)
-						WRITE(p, "  _tex[%i] = %s(u_tess_points, ivec2(index_u + u_spline_counts, index_v), 0).xy;\n", i * 4 + j, compat.texelFetch);
-					if (hasColorTess)
-						WRITE(p, "  _col[%i] = %s(u_tess_points, ivec2(index_u + u_spline_counts * 2, index_v), 0).rgba;\n", i * 4 + j, compat.texelFetch);
-				}
-			}
-
-			// Basis polynomials as weight coefficients
-			WRITE(p, "  vec4 basis_u = %s(u_tess_weights_u, %s, 0);\n", compat.texelFetch, "ivec2(weight_idx.x * 2, 0)");
-			WRITE(p, "  vec4 basis_v = %s(u_tess_weights_v, %s, 0);\n", compat.texelFetch, "ivec2(weight_idx.y * 2, 0)");
-			WRITE(p, "  mat4 basis = outerProduct(basis_u, basis_v);\n");
-		}
-
-		// Tessellate
-		WRITE(p, "  tess.pos = tess_sample(_pos, basis);\n");
-		if (hasTexcoordTess)
-			WRITE(p, "  tess.tex = tess_sample(_tex, basis);\n");
-		else
-			WRITE(p, "  tess.tex = normal.xy;\n");
-		if (hasColorTess)
-			WRITE(p, "  tess.col = tess_sample(_col, basis);\n");
-		else
-			WRITE(p, "  tess.col = u_matambientalpha;\n");
-		if (hasNormalTess) {
-			if (compat.coefsFromBuffers) {
-				// Derivatives as weight coefficients
-				WRITE(p, "  vec4 deriv_u = tess_weights_u[weight_idx.x].deriv;\n");
-				WRITE(p, "  vec4 deriv_v = tess_weights_v[weight_idx.y].deriv;\n");
-			} else {
-				// Derivatives as weight coefficients
-				WRITE(p, "  vec4 deriv_u = %s(u_tess_weights_u, %s, 0);\n", compat.texelFetch, "ivec2(weight_idx.x * 2 + 1, 0)");
-				WRITE(p, "  vec4 deriv_v = %s(u_tess_weights_v, %s, 0);\n", compat.texelFetch, "ivec2(weight_idx.y * 2 + 1, 0)");
-			}
-
-			WRITE(p, "  vec3 du = tess_sample(_pos, outerProduct(deriv_u, basis_v));\n");
-			WRITE(p, "  vec3 dv = tess_sample(_pos, outerProduct(basis_u, deriv_v));\n");
-			WRITE(p, "  tess.nrm = normalize(cross(du, dv));\n");
-		}
-		WRITE(p, "}\n");
-	}
-
 	if (useHWTransform) {
 		WRITE(p, "vec3 normalizeOr001(vec3 v) {\n");
-		WRITE(p, "   return length(v) == 0.0 ? vec3(0.0, 0.0, 1.0) : normalize(v);\n");
+		WRITE(p, "   float len2 = dot(v, v);\n");
+		WRITE(p, "   return len2 == 0.0 ? vec3(0.0, 0.0, 1.0) : (v * inversesqrt(len2));\n");
 		WRITE(p, "}\n");
 	}
 
@@ -717,7 +442,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 				WRITE(p, "  vec2 texcoord = In.texcoord;\n");
 			}
 		}
-		if (hasColor) {
+		if (hasColor || !useHWTransform) {
 			WRITE(p, "  vec4 color0 = In.color0;\n");
 			if (lmode && !useHWTransform) {
 				WRITE(p, "  vec3 color1 = In.color1;\n");
@@ -734,9 +459,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		if (!useHWTransform) {
 			WRITE(p, "  float fog = In.fog;\n");
 		}
-		if (enableBones) {
-			WRITE(p, "%s", boneWeightAttrInitHLSL[numBoneWeights]);
-		}
 	}
 
 	WRITE(p, "  bool zClipped = false;\n");
@@ -748,93 +470,25 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		} else {
 			WRITE(p, "  %sv_texcoord = vec3(texcoord, 1.0);\n", compat.vsOutPrefix);
 		}
-		if (hasColor) {
-			WRITE(p, "  %sv_color0 = color0;\n", compat.vsOutPrefix);
-			if (lmode) {
-				WRITE(p, "  %sv_color1 = color1;\n", compat.vsOutPrefix);
-			}
-		} else {
-			WRITE(p, "  %sv_color0 = u_matambientalpha;\n", compat.vsOutPrefix);
-			if (lmode) {
-				WRITE(p, "  %sv_color1 = splat3(0.0);\n", compat.vsOutPrefix);
-			}
+		WRITE(p, "  %sv_color0 = color0;\n", compat.vsOutPrefix);
+		if (lmode) {
+			WRITE(p, "  %sv_color1 = color1;\n", compat.vsOutPrefix);
 		}
 		WRITE(p, "  %sv_fogdepth = fog;\n", compat.vsOutPrefix);
-		if (isModeThrough)	{
-			WRITE(p, "  vec4 outPos = position;\n");
-			WRITE(p, "  outPos.z *= 65536.0;\n");  // TODO: This multiplication should be moved to the vertex decoders for through mode.
-		} else {
-			// The viewport has already been applied here, along with the division.
-			WRITE(p, "  vec4 outPos = position;\n");
-		}
+
+		// If non-through, the viewport has already been applied here.
+		WRITE(p, "  vec4 outPos = position;\n");
 
 		if (fsMinmaxDiscard || fsDepthClamp) {
 			WRITE(p, "  %sv_zw = vec2(outPos.z * outPos.w, outPos.w);\n", compat.vsOutPrefix);
 		}
 	} else {
-		// Step 1: World Transform / Skinning
-		if (!enableBones) {
-			if (doBezier || doSpline) {
-				// Hardware tessellation
-				WRITE(p, "  Tess tess;\n");
-				if (compat.shaderLanguage == HLSL_D3D11) {
-					WRITE(p, "  tessellate(In, tess);\n");
-				} else {
-					WRITE(p, "  tessellate(tess);\n");
-				}
-
-				WRITE(p, "  vec3 worldpos = mul(vec4(tess.pos.xyz, 1.0), u_world).xyz;\n");
-				if (hasNormalTess) {
-					WRITE(p, "  mediump vec3 worldnormal = normalizeOr001(mul(vec4(%stess.nrm, 0.0), u_world).xyz);\n", flipNormalTess ? "-" : "");
-				} else {
-					WRITE(p, "  mediump vec3 worldnormal = normalizeOr001(mul(vec4(0.0, 0.0, %s1.0, 0.0), u_world).xyz);\n", flipNormalTess ? "-" : "");
-				}
-			} else {
-				// No skinning, just standard T&L.
-				WRITE(p, "  vec3 worldpos = mul(vec4(position, 1.0), u_world).xyz;\n");
-				if (hasNormal)
-					WRITE(p, "  mediump vec3 worldnormal = normalizeOr001(mul(vec4(%snormal, 0.0), u_world).xyz);\n", flipNormal ? "-" : "");
-				else
-					WRITE(p, "  mediump vec3 worldnormal = normalizeOr001(mul(vec4(0.0, 0.0, %s1.0, 0.0), u_world).xyz);\n", flipNormal ? "-" : "");
-			}
+		// Step 1: World Transform (bones/skinning is now always handled in decode)
+		WRITE(p, "  vec3 worldpos = mul(vec4(position, 1.0), u_world).xyz;\n");
+		if (hasNormal) {
+			WRITE(p, "  mediump vec3 worldnormal = normalizeOr001(mul(vec4(%snormal, 0.0), u_world).xyz);\n", flipNormal ? "-" : "");
 		} else {
-			static const char * const rescale[4] = {"", " * 1.9921875", " * 1.999969482421875", ""}; // 2*127.5f/128.f, 2*32767.5f/32768.f, 1.0f};
-			const char *factor = rescale[boneWeightScale];
-
-			static const char * const boneWeightAttr[8] = {
-				"w1.x", "w1.y", "w1.z", "w1.w",
-				"w2.x", "w2.y", "w2.z", "w2.w",
-			};
-
-			const char *boneMatrix = compat.forceMatrix4x4 ? "mat4" : "mat3x4";
-
-			// Uncomment this to screw up bone shaders to check the vertex shader software fallback
-			// WRITE(p, "THIS SHOULD ERROR! #error");
-			if (numBoneWeights == 1 && ShaderLanguageIsOpenGL(compat.shaderLanguage))
-				WRITE(p, "  %s skinMatrix = mul(w1, u_bone0)", boneMatrix);
-			else
-				WRITE(p, "  %s skinMatrix = mul(w1.x, u_bone0)", boneMatrix);
-			for (int i = 1; i < numBoneWeights; i++) {
-				const char *weightAttr = boneWeightAttr[i];
-				// workaround for "cant do .x of scalar" issue.
-				if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
-					if (numBoneWeights == 1 && i == 0) weightAttr = "w1";
-					if (numBoneWeights == 5 && i == 4) weightAttr = "w2";
-				}
-				WRITE(p, " + mul(%s, u_bone%i)", weightAttr, i);
-			}
-
-			WRITE(p, ";\n");
-
-			WRITE(p, "  vec3 skinnedpos = mul(vec4(position, 1.0), skinMatrix).xyz%s;\n", factor);
-			WRITE(p, "  vec3 worldpos = mul(vec4(skinnedpos, 1.0), u_world).xyz;\n");
-
-			if (hasNormal) {
-				WRITE(p, "  mediump vec3 skinnednormal = mul(vec4(%snormal, 0.0), skinMatrix).xyz%s;\n", flipNormal ? "-" : "", factor);
-			} else {
-				WRITE(p, "  mediump vec3 skinnednormal = mul(vec4(0.0, 0.0, %s1.0, 0.0), skinMatrix).xyz%s;\n", flipNormal ? "-" : "", factor);
-			}
-			WRITE(p, "  mediump vec3 worldnormal = normalizeOr001(mul(vec4(skinnednormal, 0.0), u_world).xyz);\n");
+			WRITE(p, "  mediump vec3 worldnormal = normalizeOr001(mul(vec4(0.0, 0.0, %s1.0, 0.0), u_world).xyz);\n", flipNormal ? "-" : "");
 		}
 
 		WRITE(p, "  vec4 viewPos = vec4(mul(vec4(worldpos, 1.0), u_view).xyz, 1.0);\n");
@@ -886,11 +540,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		// TODO: Declare variables for dots for shade mapping if needed.
 
 		const char *srcCol = "color0";
-		if (doBezier || doSpline) {
-			// TODO: Probably, should use hasColorTess but FF4 has a problem with drawing the background.
-			srcCol = "tess.col";
-		}
-
 		if (lightUberShader && hasColor) {
 			p.F("  vec4 ambientColor = ((u_lightControl & (1u << 0x14u)) != 0x0u) ? %s : u_matambientalpha;\n", srcCol);
 			if (enableLighting) {
@@ -1117,16 +766,13 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 				if (specularIsZero) {
 					WRITE(p, "  %sv_color0 = clamp(lightSum0, 0.0, 1.0);\n", compat.vsOutPrefix);
 				} else {
-					WRITE(p, "  %sv_color0 = clamp(clamp(lightSum0, 0.0, 1.0) + vec4(lightSum1, 0.0), 0.0, 1.0);\n", compat.vsOutPrefix);
+					WRITE(p, "  %sv_color0 = clamp(vec4(lightSum0.rgb + lightSum1, lightSum0.a), 0.0, 1.0);\n", compat.vsOutPrefix);
 				}
 			}
 		} else {
 			// Lighting doesn't affect color.
 			if (hasColor) {
-				if (doBezier || doSpline)
-					WRITE(p, "  %sv_color0 = tess.col;\n", compat.vsOutPrefix);
-				else
-					WRITE(p, "  %sv_color0 = color0;\n", compat.vsOutPrefix);
+				WRITE(p, "  %sv_color0 = color0;\n", compat.vsOutPrefix);
 			} else {
 				WRITE(p, "  %sv_color0 = u_matambientalpha;\n", compat.vsOutPrefix);
 				if (bugs.Has(Draw::Bugs::MALI_CONSTANT_LOAD_BUG) && g_Config.bVendorBugChecksEnabled) {
@@ -1147,19 +793,13 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			case GE_TEXMAP_UNKNOWN: // Not sure what this is, but Riviera uses it.  Treating as coords works.
 				if (scaleUV) {
 					if (hasTexcoord) {
-						if (doBezier || doSpline)
-							WRITE(p, "  %sv_texcoord = vec3(tess.tex.xy * u_uvscaleoffset.xy + u_uvscaleoffset.zw, 0.0);\n", compat.vsOutPrefix);
-						else
-							WRITE(p, "  %sv_texcoord = vec3(texcoord.xy * u_uvscaleoffset.xy, 0.0);\n", compat.vsOutPrefix);
+						WRITE(p, "  %sv_texcoord = vec3(texcoord.xy * u_uvscaleoffset.xy, 0.0);\n", compat.vsOutPrefix);
 					} else {
 						WRITE(p, "  %sv_texcoord = splat3(0.0);\n", compat.vsOutPrefix);
 					}
 				} else {
 					if (hasTexcoord) {
-						if (doBezier || doSpline)
-							WRITE(p, "  %sv_texcoord = vec3(tess.tex.xy * u_uvscaleoffset.xy + u_uvscaleoffset.zw, 0.0);\n", compat.vsOutPrefix);
-						else
-							WRITE(p, "  %sv_texcoord = vec3(texcoord.xy * u_uvscaleoffset.xy + u_uvscaleoffset.zw, 0.0);\n", compat.vsOutPrefix);
+						WRITE(p, "  %sv_texcoord = vec3(texcoord.xy * u_uvscaleoffset.xy + u_uvscaleoffset.zw, 0.0);\n", compat.vsOutPrefix);
 					} else {
 						WRITE(p, "  %sv_texcoord = vec3(u_uvscaleoffset.zw, 0.0);\n", compat.vsOutPrefix);
 					}
@@ -1171,39 +811,28 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 					std::string temp_tc;
 					switch (uvProjMode) {
 					case GE_PROJMAP_POSITION:  // Use model space XYZ as source
-						if (doBezier || doSpline)
-							temp_tc = "vec4(tess.pos, 1.0)";
-						else
-							temp_tc = "vec4(position, 1.0)";
+						temp_tc = "vec4(position, 1.0)";
 						break;
 					case GE_PROJMAP_UV:  // Use unscaled UV as source
-						{
-							// prescale is false here.
-							if (hasTexcoord) {
-								if (doBezier || doSpline)
-									temp_tc = "vec4(tess.tex.xy, 0.0, 1.0)";
-								else
-									temp_tc = "vec4(texcoord.xy, 0.0, 1.0)";
-							} else {
-								temp_tc = "vec4(0.0, 0.0, 0.0, 1.0)";
-							}
+						if (hasTexcoord) {
+							temp_tc = "vec4(texcoord.xy, 0.0, 1.0)";
+						} else {
+							temp_tc = "vec4(0.0, 0.0, 0.0, 1.0)";
 						}
 						break;
 					case GE_PROJMAP_NORMALIZED_NORMAL:  // Use normalized transformed normal as source
-						if ((doBezier || doSpline) && hasNormalTess)
-							temp_tc = StringFromFormat("length(tess.nrm) == 0.0 ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(normalize(%stess.nrm), 1.0)", flipNormalTess ? "-" : "");
-						else if (hasNormal)
+						if (hasNormal) {
 							temp_tc = StringFromFormat("length(normal) == 0.0 ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(normalize(%snormal), 1.0)", flipNormal ? "-" : "");
-						else
+						} else {
 							temp_tc = "vec4(0.0, 0.0, 1.0, 1.0)";
+						}
 						break;
 					case GE_PROJMAP_NORMAL:  // Use non-normalized transformed normal as source
-						if ((doBezier || doSpline) && hasNormalTess)
-							temp_tc = flipNormalTess ? "vec4(-tess.nrm, 1.0)" : "vec4(tess.nrm, 1.0)";
-						else if (hasNormal)
+						if (hasNormal) {
 							temp_tc = flipNormal ? "vec4(-normal, 1.0)" : "vec4(normal, 1.0)";
-						else
+						} else {
 							temp_tc = "vec4(0.0, 0.0, 1.0, 1.0)";
+						}
 						break;
 					}
 					// Transform by texture matrix. XYZ as we are doing projection mapping.
@@ -1255,6 +884,8 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 
 	// I think we should use min/max clipping for through-mode as well, right?
 	if (clipMinMax) {
+		// NOTE: When changing this test, don't forget to change the test in the fragment shader fallback too.
+
 		// We use clipping, where available, to implement min/max Z.
 		// 1.0 is used to disable the clip plane (should we generate more shaders instead? how costly are they?)
 
@@ -1262,25 +893,29 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		// We should probably store the undivided outPos in a variable.
 
 		// We round to nearest 15-bit value for the check - this seems to match some of [Unknown]'s test, and PSP GPU floats
-		// often have a 15-bit mantissa.
-		WRITE(p, "  float clipZ = floor(outPos.z * 0.5 + 0.5) * 2.0;\n");
+		// often have a 15-bit mantissa. TODO: should we truncate or nearest?
+		// Due to us having a bit too much precision, we round the value up for the min check and down for the max check.
+		// Will test this on hardware more carefully soon.
+		// The min check rounded down fixes the Test Drive map problem, and the max check rounded down fixes Taiko no Tatsujin.
+		WRITE(p, "  float clipZNear = floor(outPos.z * 0.5 + 0.5) * 2.0;\n");
+		WRITE(p, "  float clipZFar = floor(outPos.z * 0.5) * 2.0;\n");
 
-		WRITE(p, "  %sgl_ClipDistance%s = u_minZmaxZ.x > 0.0 ? (clipZ - u_minZmaxZ.x) * outPos.w : 1.0;\n", compat.vsOutPrefix, minZClipPlaneSuffix);
-		WRITE(p, "  %sgl_ClipDistance%s = u_minZmaxZ.y < 65535.0 ? (u_minZmaxZ.y - clipZ) * outPos.w : 1.0;\n", compat.vsOutPrefix, maxZClipPlaneSuffix);
+		WRITE(p, "  %sgl_ClipDistance%s = u_minZmaxZ.x > 0.0 ? (clipZNear - u_minZmaxZ.x) * outPos.w : 1.0;\n", compat.vsOutPrefix, minZClipPlaneSuffix);
+		WRITE(p, "  %sgl_ClipDistance%s = u_minZmaxZ.y < 65535.0 ? (u_minZmaxZ.y - clipZFar) * outPos.w : 1.0;\n", compat.vsOutPrefix, maxZClipPlaneSuffix);
 	}
 
-	// Convert to NDC space, using the framebuffer offset and size stored in u_xywh.
-	WRITE(p, "  outPos.xy = ((outPos.xy - u_xywh.xy) / u_xywh.zw) * 2.0 - 1.0;\n");
+	// Convert to NDC space, using the framebuffer offset and (inverse size * 2) stored in u_xywh.
+	WRITE(p, "  outPos.xy = (((outPos.xy + u_xywh.xy) * u_xywh.zw) - vec2(1.0, 1.0)) * outPos.w;\n");
 
 	if (gstate_c.Use(GPU_ROUND_DEPTH_TO_16BIT)) {
-		WRITE(p, "  outPos.z = float(int(outPos.z));\n");
+		// Actually 15-bit. Truncate here fixes Afterburner (similarly to the min/max clipping above).
+		// Possibly this should only be 15-bit in transformed mode? Full 16 in through? needs hardware testing.
+		WRITE(p, "  outPos.z = floor(outPos.z * 0.5) * 2.0;\n");
 	}
 
-	WRITE(p, "  outPos.z = outPos.z / 65536.0;\n");  // Or 65536?
-
-	// Convert back to clip space coordinates. This is needed for all modern shader models.
-	// After all our work in projected space, multiply xyz back with z to the get clip space position that the shader model wants.
-	WRITE(p, "  outPos.xyz *= outPos.w;\n");
+	// It seems that depth values of 65535.6 should survive. Seen in NBA2K12 for example.
+	// So even if it seems like 65535 would make more sense, we divide by 65536 here.
+	WRITE(p, "  outPos.z *= outPos.w * (1.0 / 65536.0);\n");
 
 	if (compat.shaderLanguage == GLSL_VULKAN && gstate_c.Use(GPU_USE_PRE_ROTATION)) {
 		// Apply rotation from the uniform.
@@ -1317,19 +952,13 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 	if (fsDepthClamp) {
 		// Overwrite Z with a value that will not be clipped.
 		// Then we will overwrite the Z in the fragment shader with the per-pixel value computed from the interpolated v_zw.
-		WRITE(p, "  %sgl_Position.z = (u_minZmaxZ.x + u_minZmaxZ.y) * 0.5 * (1.0 / 65536.0) * outPos.w;\n", compat.vsOutPrefix);
+		WRITE(p, "  %sgl_Position.z = (u_minZmaxZ.x + u_minZmaxZ.y) * (0.5 / 65536.0) * outPos.w;\n", compat.vsOutPrefix);
 	}
 
 	if (compat.depthMinusOneToOne) {
 		// Convert from 0->1 to -1->1 depth range.
 		WRITE(p, "  %sgl_Position.z = %sgl_Position.z * 2.0 - %sgl_Position.w;\n", compat.vsOutPrefix, compat.vsOutPrefix, compat.vsOutPrefix);
 		// The formula takes the z component of gl_Position, which is currently in the range [0, w] (where w is the homogeneous coordinate), and transforms it to the range [-w, w]. This is done by first multiplying by 2 to scale the range from [0, w] to [0, 2w], and then subtracting w to shift the range to [-w, w]. This effectively converts the depth range from 0->1 to -1->1 after perspective division (when gl_Position is divided by w).
-	}
-
-	if (needsZWHack) {
-		// See comment in thin3d_vulkan.cpp.
-		WRITE(p, "  if (%sgl_Position.z == %sgl_Position.w) %sgl_Position.z *= 0.999999;\n",
-			compat.vsOutPrefix, compat.vsOutPrefix, compat.vsOutPrefix);
 	}
 
 	if (compat.shaderLanguage == HLSL_D3D11) {

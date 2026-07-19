@@ -26,19 +26,22 @@
 #include "Core/System.h"
 #include "GPU/GPUState.h"
 #include "GPU/Math3D.h"
+#include "GPU/GPUDefinitions.h"
 #include "GPU/GPUStateSIMDUtil.h"
 #include "GPU/Common/FramebufferManagerCommon.h"
 #include "GPU/Common/GPUStateUtils.h"
 #include "GPU/Common/SoftwareTransformCommon.h"
+#include "GPU/Common/ShaderUniforms.h"
 #include "GPU/Common/TransformCommon.h"
 #include "GPU/Common/VertexDecoderCommon.h"
+#include "GPU/Common/VertexReader.h"
 #include "GPU/Common/DrawEngineCommon.h"
 #include "GPU/Software/Clipper.h"
 
 static bool ExpandRectangles(int vertexCount, int &numDecodedVerts, int vertsSize, u16 *&inds, int indsSize, const TransformedVertex *transformed, TransformedVertex *transformedExpanded, int *drawIndexCount, bool throughmode, bool *pixelMappedExactly);
 static bool ExpandLines(int vertexCount, int &numDecodedVerts, int vertsSize, u16 *&inds, int indsSize, const TransformedVertex *transformed, TransformedVertex *transformedExpanded, int *drawIndexCount, bool throughmode);
-static bool ExpandPoints(int vertexCount, int &maxIndex, int vertsSize, u16 *&inds, int indsSize, const TransformedVertex *transformed, TransformedVertex *transformedExpanded, int *drawIndexCount, bool throughmode);
-static SoftwareTransformAction ProjectClipAndExpand(SoftwareTransformParams &params, int prim, int vertexCount, u32 vertType, u16 *&inds, int indsSize, int &numDecodedVerts, int vertsSize, SoftwareTransformResult *result);
+static bool ExpandPoints(int vertexCount, int &maxIndex, int vertsSize, u16 *&inds, int indsSize, const TransformedVertex *transformed, TransformedVertex *transformedExpanded, int *drawIndexCount, bool throughmode, float pointScale);
+static SoftwareTransformAction ProjectClipAndExpand(SoftwareTransformParams &params, int prim, int vertexCount, u32 vertType, u16 *&inds, int indsSize, int numDecodedVerts, int vertsSize, SoftwareTransformResult *result);
 
 // This is the software transform pipeline, which is necessary for supporting RECT
 // primitives correctly without geometry shaders, and may be easier to use for
@@ -60,7 +63,8 @@ static SoftwareTransformAction ProjectClipAndExpand(SoftwareTransformParams &par
 // Note: 0 is BR and 2 is TL.
 
 // The PSP has a funky mechanism where the UV direction of screen-space rectangles is decided by the relative positioning
-// of the two corners defining the rectangle.
+// of the two corners defining the rectangle. This all boils down to a simple swap of the UVs of the two middle vertices,
+// after a check.
 static void RotateUV(TransformedVertex v[4]) {
 	const float x1 = v[2].x;
 	const float x2 = v[0].x;
@@ -74,6 +78,10 @@ static void RotateUV(TransformedVertex v[4]) {
 		v[3].u = tempu;
 		v[3].v = tempv;
 	}
+}
+
+static bool ShouldApplySpriteBorderFix(const GEState &gstate) {
+	return gstate.isMagnifyFilteringEnabled() && gstate.isAlphaBlendEnabled() && gstate.getBlendFuncA() != GE_SRCBLEND_FIXA && gstate.isTextureAlphaUsed();
 }
 
 // Clears on the PSP are best done by drawing a series of vertical strips
@@ -117,38 +125,12 @@ static bool IsReallyAClear(const TransformedVertex *transformed, int numVerts, f
 }
 
 // At the end, this calls ProjectClipAndExpand which will expand rectangles as necessary, or apply culling.
-SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, int prim, u32 vertType, const DecVtxFormat &decVtxFormat, int &numDecodedVerts, int vertsSize, int vertexCount, u16 *&inds, int indsSize, SoftwareTransformResult *result) {
+SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, int prim, u32 vertType, const DecVtxFormat &decVtxFormat, int numDecodedVerts, int vertsSize, int vertexCount, u16 *&inds, int indsSize, SoftwareTransformResult *result) {
 	// These primitive are not handled.
 	_dbg_assert_(prim != GE_PRIM_KEEP_PREVIOUS && prim != GE_PRIM_TRIANGLE_FAN && prim != GE_PRIM_TRIANGLE_STRIP && prim != GE_PRIM_LINE_STRIP);
 
-	bool throughmode = (vertType & GE_VTYPE_THROUGH_MASK) != 0;
-	bool lmode = gstate.isUsingSecondaryColor() && gstate.isLightingEnabled();
-
-	float uscale = 1.0f;
-	float vscale = 1.0f;
-	if (throughmode && prim != GE_PRIM_RECTANGLES) {
-		// For through rectangles, we do this scaling in Expand.
-		uscale /= gstate_c.curTextureWidth;
-		vscale /= gstate_c.curTextureHeight;
-	}
-
-	const int w = gstate.getTextureWidth(0);
-	const int h = gstate.getTextureHeight(0);
-	float widthFactor = (float) w / (float) gstate_c.curTextureWidth;
-	float heightFactor = (float) h / (float) gstate_c.curTextureHeight;
-
-	Lighter lighter(vertType);
-	float fog_end = getFloat24(gstate.fog1);
-	float fog_slope = getFloat24(gstate.fog2);
-	// Same fixup as in ShaderManagerGLES.cpp
-	// Not really sure what a sensible value might be, but let's try 64k.
-	constexpr float largeFogValue = 65535.0f;
-	if (my_isnanorinf(fog_end)) {
-		fog_end = std::signbit(fog_end) ? -largeFogValue : largeFogValue;
-	}
-	if (my_isnanorinf(fog_slope)) {
-		fog_slope = std::signbit(fog_slope) ? -largeFogValue : largeFogValue;
-	}
+	const bool throughmode = (vertType & GE_VTYPE_THROUGH_MASK) != 0;
+	const bool lmode = gstate.isUsingSecondaryColor() && gstate.isLightingEnabled();
 
 	TransformedVertex *transformed = params.transformed;
 	VertexReader reader(params.decoded, decVtxFormat, vertType);
@@ -156,6 +138,15 @@ SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, in
 		const u32 materialAmbientRGBA = gstate.getMaterialAmbientRGBA();
 		const bool hasColor = reader.hasColor0();
 		const bool hasUV = reader.hasUV();
+
+		float uscale = 1.0f;
+		float vscale = 1.0f;
+		if (prim != GE_PRIM_RECTANGLES) {
+			// For through rectangles, we do this scaling in Expand.
+			uscale /= gstate_c.curTextureWidth;
+			vscale /= gstate_c.curTextureHeight;
+		}
+
 		for (int index = 0; index < numDecodedVerts; index++) {
 			// Do not touch the coordinates or the colors. No lighting.
 			reader.Goto(index);
@@ -196,12 +187,6 @@ SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, in
 			int scissorX2 = gstate.getScissorX2() + 1;
 			int scissorY2 = gstate.getScissorY2() + 1;
 			reallyAClear = IsReallyAClear(transformed, numDecodedVerts, scissorX2, scissorY2);
-
-			if (reallyAClear && gstate.getColorMask() != 0xFFFFFFFF && (gstate.isClearModeColorMask() || gstate.isClearModeAlphaMask())) {
-				result->setSafeSize = true;
-				result->safeWidth = scissorX2;
-				result->safeHeight = scissorY2;
-			}
 		}
 		if (params.allowClear && reallyAClear && gl_extensions.gpuVendor != GPU_VENDOR_IMGTEC) {
 			// If alpha is not allowed to be separate, it must match for both depth/stencil and color.  Vulkan requires this.
@@ -210,9 +195,7 @@ SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, in
 			bool matchingComponents = params.allowSeparateAlphaClear || (alphaMatchesColor && depthMatchesStencil);
 			bool stencilNotMasked = !gstate.isClearModeAlphaMask() || gstate.getStencilWriteMask() == 0x00;
 			if (matchingComponents && stencilNotMasked) {
-				DepthScaleFactors depthScale = GetDepthScaleFactors(gstate_c.UseFlags());
-				// Need to rescale from a [0, 1] float.  This is the final transformed value.
-				float depth = depthScale.EncodeFromU16((float)(int)(transformed[1].z * 65535.0f));
+				float depth = std::clamp(transformed[1].z, 0.0f, 65535.0f) / 65535.0f;
 				// Non-zero depth clears are unusual, but some drivers don't match drawn depth values to cleared values.
 				// Games sometimes expect exact matches (see #12626, for example) for equal comparisons.
 				if (!(params.everUsedEqualDepth && gstate.isClearModeDepthMask() && result->depth > 0.0f && result->depth < 1.0f)) {
@@ -224,6 +207,17 @@ SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, in
 			}
 		}
 	} else {
+		Lighter lighter(vertType);
+		float fogVal[2];
+		UpdateFogCoef(gstate, fogVal);
+		const float fog_end = fogVal[0];
+		const float fog_slope = fogVal[1];
+
+		const int texW = gstate.getTextureWidth(0);
+		const int texH = gstate.getTextureHeight(0);
+		const float widthFactor = (float)texW / (float)gstate_c.curTextureWidth;
+		const float heightFactor = (float)texH / (float)gstate_c.curTextureHeight;
+
 		const Vec4f materialAmbientRGBA = Vec4f::FromRGBA(gstate.getMaterialAmbientRGBA());
 		// Okay, need to actually perform the full transform.
 		for (int index = 0; index < numDecodedVerts; index++) {
@@ -380,25 +374,7 @@ SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, in
 
 			// Projection happens later in ProjectClipAndExpand.
 
-			// Vertex depth rounding is done in the shader, to simulate the 16-bit depth buffer.
-		}
-	}
-
-	// TODO: This doesn't seem to be a very good check, but let's leave it for now.
-
-	// Detect full screen "clears" that might not be so obvious, to set the safe size if possible.
-	if (!result->setSafeSize && prim == GE_PRIM_RECTANGLES && numDecodedVerts == 2 && throughmode) {
-		bool clearingColor = gstate.isModeClear() && (gstate.isClearModeColorMask() || gstate.isClearModeAlphaMask());
-		bool writingColor = gstate.getColorMask() != 0xFFFFFFFF;
-		bool startsZeroX = transformed[0].x <= 0.0f && transformed[1].x > 0.0f && transformed[1].x > transformed[0].x;
-		bool startsZeroY = transformed[0].y <= 0.0f && transformed[1].y > 0.0f && transformed[1].y > transformed[0].y;
-
-		if (startsZeroX && startsZeroY && (clearingColor || writingColor)) {
-			int scissorX2 = gstate.getScissorX2() + 1;
-			int scissorY2 = gstate.getScissorY2() + 1;
-			result->setSafeSize = true;
-			result->safeWidth = std::min(scissorX2, (int)transformed[1].x);
-			result->safeHeight = std::min(scissorY2, (int)transformed[1].y);
+			// Vertex depth rounding is done in the shader if enabled, to simulate the 16-bit depth buffer.
 		}
 	}
 
@@ -407,7 +383,7 @@ SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, in
 
 // Modifies the vertices in-place. Applies viewport and projection.
 // TODO: SIMD.
-static void ProjectVertices(const GPUgstate &gstate, TransformedVertex *transformed, int vertexCount) {
+static void ProjectVertices(const GEState &gstate, TransformedVertex *transformed, int vertexCount) {
 #if 0
 	Lin::Vec3 vpOffset(gstate.getViewportXCenter(), gstate.getViewportYCenter(), gstate.getViewportZCenter());
 	Lin::Vec3 vpScale(gstate.getViewportXScale(), gstate.getViewportYScale(), gstate.getViewportZScale());
@@ -434,8 +410,8 @@ static void ProjectVertices(const GPUgstate &gstate, TransformedVertex *transfor
 #endif
 }
 
-// Helper to check if a vertex is inside the near plane (z >= -w)
-// We add a tiny epsilon to prevent floating-point precision issues at the exact boundary
+// Helper to check if a vertex is inside the near plane (z >= -w).
+// TODO: Should this somehow match the cull plane, which is at -3F8000FF (-1.0 minus an epsilon seemingly derived from a 15-bit mantissa).
 inline bool IsInsideNearPlane(const TransformedVertex& v) {
 	return v.z >= -v.pos_w;
 }
@@ -519,7 +495,8 @@ static void ClipTrianglesAgainstNearPlane(
 			int polyLength = 0;
 
 			for (int j = 0; j < 3; ++j) {
-				int next = (j + 1) % 3;
+				int next = j + 1;
+				if (next >= 3) next = 0;
 
 				u16 currIdx = triIdx[j];
 				u16 nextIdx = triIdx[next];
@@ -589,7 +566,130 @@ static void ClipTrianglesAgainstNearPlane(
 	gpuStats.perFrame.numSoftClippedTriangles++;
 }
 
-static SoftwareTransformAction ProjectClipAndExpand(SoftwareTransformParams &params, int prim, int vertexCount, u32 vertType, u16 *&inds, int indsSize, int &numDecodedVerts, int vertsSize, SoftwareTransformResult *result) {
+// Note: This modifies the U/V coordinates of transformed.
+static void ApplySpriteBorderFixTriangles(TransformedVertex *transformed, const u16 *quad, float uScale, float vScale, float spriteBorderFix) {
+	// We have two triangles, but the vertex order can really be anything. We just need to find the shared edge, and then check the opposite vertices.
+
+	// sharedA and sharedB are indices into transformed, picked from the quad array.
+	// We find shared indices between the two triangles through a double loop.
+	int sharedA = -1;
+	int sharedB = -1;
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			if (quad[i] == quad[3 + j]) {
+				if (sharedA == -1) {
+					sharedA = quad[i];
+				} else if (quad[i] != sharedA) {
+					sharedB = quad[i];
+				}
+			}
+		}
+	}
+
+	if (sharedA == -1 || sharedB == -1) {
+		// For this detection method, we require two vertices to be shared between the two triangles.
+		// We'll miss sprites made from pure triangle lists, but let's look into that later.
+		return;
+	}
+
+	// Now, search for the two other corners.
+	int cornerA = -1;
+	int cornerB = -1;
+	for (int i = 0; i < 6; i++) {
+		if (quad[i] != sharedA && quad[i] != sharedB) {
+			if (cornerA == -1) {
+				cornerA = quad[i];
+			} else {
+				cornerB = quad[i];
+				break;
+			}
+		}
+	}
+
+	if (cornerA == cornerB) {
+		_dbg_assert_(false);
+		// This should never happen, but just in case.
+		return;
+	}
+	_dbg_assert_(cornerA != -1 && cornerB != -1 && sharedA != sharedB && sharedA != cornerA && sharedA != cornerB && sharedB != cornerA && sharedB != cornerB);
+
+	//  SharedA ---------------- CornerA
+	//      |   \                   |
+	//      |       \               |
+	//      |           \           |
+	//      |               \       |
+	//      |                   \   |
+	//  CornerB ---------------- SharedB
+
+	// The border fix will be to slightly move the UVs inward (and XY by a corresponding amount), so that on upscaled resolutions we can avoid unexpected filtering artifacts. They will
+	// be moved inward by `spriteBorderFix` texels.
+	// Now, how can we make that general... Probably should figure out a UV gradient.
+
+	TransformedVertex &vSharedA = transformed[sharedA];
+	TransformedVertex &vCornerA = transformed[cornerA];
+	TransformedVertex &vSharedB = transformed[sharedB];
+	TransformedVertex &vCornerB = transformed[cornerB];
+
+	bool validSprite = false;
+
+	// Now there's two possible orientations for the X/Y coordinates. Either the second corners shares the Y axis with the opposite vertices, or the X axis.
+	if (vSharedA.y == vCornerA.y && vSharedB.y == vCornerB.y) {
+		// Shared Y axis. Check that the X axis is correct.
+		if (vSharedA.x == vCornerB.x && vSharedB.x == vCornerA.x) {
+			validSprite = vSharedA.u == vCornerB.u && vSharedB.u == vCornerA.u &&
+				vSharedA.v == vCornerA.v && vSharedB.v == vCornerB.v;
+		}
+	} else if (vSharedA.x == vCornerA.x && vSharedB.x == vCornerB.x) {
+		// Shared X axis. Check that the Y axis is correct.
+		if (vSharedB.y == vCornerA.y && vSharedA.y == vCornerB.y) {
+			// validSprite = vSharedA.u == vCornerA.u && vSharedA.v == vCornerA.v &&
+			// 	vSharedB.u == vCornerB.u && vSharedB.v == vCornerB.v;
+		}
+	}
+
+	const float invUScale = 1.0f / uScale;
+	const float invVScale = 1.0f / vScale;
+	if (validSprite) {
+		// We have a valid sprite! Apply the border fix if needed.
+		if (spriteBorderFix != 0.0f) {
+			const bool topleft = spriteBorderFix < 0.0f;
+			spriteBorderFix = fabsf(spriteBorderFix);
+
+			//spriteBorderFix *= 10.0f;
+			const float uBorderFix = spriteBorderFix * invUScale;
+			const float vBorderFix = spriteBorderFix * invVScale;
+			// Move the UVs inward by the border fix. We can just move them both in the same direction, since that will still keep them pixel aligned.
+			// Wait, this doesn't work. What if the corners are flipped? We need to figure out the direction of the gradient, and then apply the border fix in the correct direction.
+			const float dx = (vSharedB.x - vSharedA.x);
+			const float dy = (vSharedB.y - vSharedA.y);
+			// Avoid messing with full screen sprites.
+			const float du = (vSharedB.u - vSharedA.u);
+			const float dv = (vSharedB.v - vSharedA.v);
+			if (du != 0.0f && fabsf(dx) != 480.0f) {
+				const float uSign = (du > 0.0f ? 1.0f : -1.0f);
+				const float uAmount = uBorderFix * uSign;
+				if (topleft) {
+					vSharedA.u += uAmount;
+					vCornerB.u += uAmount;
+				}
+				vCornerA.u -= uAmount;
+				vSharedB.u -= uAmount;
+			}
+			if (dv != 0.0f && fabsf(dy) != 272.0f) {
+				const float vSign = (dv > 0.0f ? 1.0f : -1.0f);
+				const float vAmount = vBorderFix * vSign;
+				if (topleft) {
+					vSharedA.v += vAmount;
+					vCornerA.v += vAmount;
+				}
+				vCornerB.v -= vAmount;
+				vSharedB.v -= vAmount;
+			}
+		}
+	}
+}
+
+static SoftwareTransformAction ProjectClipAndExpand(SoftwareTransformParams &params, int prim, int vertexCount, u32 vertType, u16 *&inds, int indsSize, int numDecodedVerts, int vertsSize, SoftwareTransformResult *result) {
 	TransformedVertex *transformed = params.transformed;
 	TransformedVertex *transformedExpanded = params.transformedExpanded;
 	bool throughmode = (vertType & GE_VTYPE_THROUGH_MASK) != 0;
@@ -636,7 +736,7 @@ static SoftwareTransformAction ProjectClipAndExpand(SoftwareTransformParams &par
 		}
 
 		result->pixelMapped = false;
-		if (!ExpandPoints(vertexCount, numDecodedVerts, vertsSize, inds, indsSize, transformed, transformedExpanded, &drawIndexCount, throughmode)) {
+		if (!ExpandPoints(vertexCount, numDecodedVerts, vertsSize, inds, indsSize, transformed, transformedExpanded, &drawIndexCount, throughmode, params.pointScale)) {
 			result->drawVertexCount = 0;
 			result->drawIndexCount = 0;
 			result->drawBuffer = nullptr;
@@ -665,44 +765,64 @@ static SoftwareTransformAction ProjectClipAndExpand(SoftwareTransformParams &par
 		// We might actually write more vertics at the end of transformed.
 
 		drawIndexCount = vertexCount;
+
 		result->pixelMapped = false;
 
-		if (throughmode) {
-			// Nothing to do, pass the vertices right through as-is. Well, we can go look for pixel mapping,
-			// but we don't do any projection, culling or clipping.
-			if (g_Config.bSmart2DTexFiltering && !gstate_c.textureIsVideo) {
-				// We check some common cases for pixel mapping.
-				// TODO: It's not really optimal that some previous step has removed the triangle strip.
-				if (vertexCount <= 6 && prim == GE_PRIM_TRIANGLES) {
-					// It's enough to check UV deltas vs pos deltas between vertex pairs:
-					// 0-1 1-3 3-2 2-0. Maybe can even skip the last one. Probably some simple math can get us that sequence.
-					// Unfortunately we need to reverse the previous UV scaling operation. Fortunately these are powers of two
-					// so the operations are exact.
-					bool pixelMapped = true;
-					const u16 *indsIn = (const u16 *)inds;
-					const float uscale = gstate_c.curTextureWidth;
-					const float vscale = gstate_c.curTextureHeight;
-					for (int t = 0; t < vertexCount; t += 3) {
-						struct { int a; int b; } pairs[] = {{0, 1}, {1, 2}, {2, 0}};
-						for (int i = 0; i < ARRAY_SIZE(pairs); i++) {
-							int a = indsIn[t + pairs[i].a];
-							int b = indsIn[t + pairs[i].b];
-							float du = fabsf((transformed[a].u - transformed[b].u) * uscale);
-							float dv = fabsf((transformed[a].v - transformed[b].v) * vscale);
-							float dx = fabsf(transformed[a].x - transformed[b].x);
-							float dy = fabsf(transformed[a].y - transformed[b].y);
-							if (du != dx || dv != dy) {
-								pixelMapped = false;
-							}
-						}
-						if (!pixelMapped) {
-							break;
-						}
+		// Let's go look for pixel mapping.
+		const bool flat = ((u32)params.clipInfoFlags & ((u32)(ClipInfoFlags::Valid | ClipInfoFlags::FlatZ))) == (u32)(ClipInfoFlags::Valid | ClipInfoFlags::FlatZ);
+		const bool lookForPixelMapping = flat && gstate.isMagnifyFilteringEnabled() && g_Config.bSmart2DTexFiltering;
+
+		// TODO: We should probably take uv scale into account?
+		const float uScale = gstate_c.curTextureWidth;
+		const float vScale = gstate_c.curTextureHeight;
+		bool pixelMapped = true;
+		if (lookForPixelMapping && !gstate_c.textureIsVideo) {
+			// We check some common cases for pixel mapping.
+			//
+			// It's enough to check UV deltas vs pos deltas between vertex pairs:
+			// 0-1 1-3 3-2 2-0. Maybe can even skip the last one. Probably some simple math can get us that sequence.
+			// Unfortunately we need to reverse the previous UV scaling operation. Fortunately these are powers of two
+			// so the operations are exact.
+			//
+			// Additionally, we check for sprite lists. These are used for example in GTA.
+			const u16 *indsIn = (const u16 *)inds;
+			for (int t = 0; t < vertexCount; t += 3) {
+				struct { int a; int b; } pairs[] = {{0, 1}, {1, 2}, {2, 0}};
+				for (int i = 0; i < ARRAY_SIZE(pairs); i++) {
+					const int a = indsIn[t + pairs[i].a];
+					const int b = indsIn[t + pairs[i].b];
+					const float du = fabsf((transformed[a].u - transformed[b].u) * uScale);
+					const float dv = fabsf((transformed[a].v - transformed[b].v) * vScale);
+					const float dx = fabsf(transformed[a].x - transformed[b].x);
+					const float dy = fabsf(transformed[a].y - transformed[b].y);
+					if (du != dx || dv != dy) {
+						pixelMapped = false;
 					}
-					result->pixelMapped = pixelMapped;
+				}
+				if (!pixelMapped) {
+					// Early out. Later add an early out for sprite border fix too.
+					break;
 				}
 			}
-		} else {
+			result->pixelMapped = pixelMapped;
+		}
+
+		// Apply the sprite border fix, but only if pixel mapping was not detected!
+		if (flat) {
+			const float spriteBorderFix = ShouldApplySpriteBorderFix(gstate) ? PSP_CoreParameter().compat.flags().SpriteBorderFix : 0.0f;  // if != 0.0, apply border fix.
+			if (spriteBorderFix != 0.0f) {
+				// This assumes that we have a list of two-triangle sprites. If not the position checks will fail anyway.
+				const u16 *indsIn = (const u16 *)inds;
+				for (int t = 0; t < vertexCount - 5; t += 6) {
+					// The previous triangle started three vertices ago. Now, let's do some disgustingly hacky checks,
+					// to identify the type of sprite (if any) and move the UV coordinates inwards a bit.
+					const u16 *quad = indsIn + t;
+					ApplySpriteBorderFixTriangles(transformed, quad, uScale, vScale, spriteBorderFix);
+				}
+			}
+		}
+
+		if (!throughmode) {
 			// Culling and clipping needs to be done here, it doesn't happen in the shader in the case of software transform.
 			// However, fast culling should already have taken care of the Z<-W and Z>W culling, but we check for it on a per-triangle
 			// basis here anyway.
@@ -730,12 +850,15 @@ static SoftwareTransformAction ProjectClipAndExpand(SoftwareTransformParams &par
 				// First, check inside/outside directions for each index.
 				// We are still in clip space here, so we can cull aggressively in Z.
 				// TODO: This is so cheap now that we can probably avoid the buffer and just do the work below.
+				// See the comment in VertexShader for the epsilons
+
 				for (int i = 0; i < vertexCount; ++i) {
 					float z = transformed[indsIn[i]].z;
 					float w = transformed[indsIn[i]].pos_w;
-					if (z > w) {
+					const float delta = 0.0000304f / w;
+					if (z > w + delta) {
 						outsideZ[i] = 1;
-					} else if (z < -w) {
+					} else if (z < -(w + delta)) {
 						outsideZ[i] = -1;
 					} else {
 						outsideZ[i] = 0;
@@ -852,34 +975,65 @@ static bool ExpandRectangles(int vertexCount, int &numDecodedVerts, int vertsSiz
 
 	numDecodedVerts = 4 * (vertexCount / 2);
 
-	float uscale = 1.0f;
-	float vscale = 1.0f;
+	float uScale = 1.0f;
+	float vScale = 1.0f;
 	if (throughmode) {
-		uscale /= gstate_c.curTextureWidth;
-		vscale /= gstate_c.curTextureHeight;
+		uScale /= gstate_c.curTextureWidth;
+		vScale /= gstate_c.curTextureHeight;
 	}
 
 	bool pixelMapped = g_Config.bSmart2DTexFiltering && !gstate_c.textureIsVideo;
+	if (pixelMapped) {
+		// Check for pixel mapping. If we find pixel mapping, abandon spriteBorderFix.
+		for (int i = 0; i < vertexCount; i += 2) {
+			const TransformedVertex &transVtxTL = transformed[indsIn[i + 0]];
+			const TransformedVertex &transVtxBR = transformed[indsIn[i + 1]];
+
+			if (pixelMapped) {
+				float dx = transVtxBR.x - transVtxTL.x;
+				float dy = transVtxBR.y - transVtxTL.y;
+				float du = transVtxBR.u - transVtxTL.u;
+				float dv = transVtxBR.v - transVtxTL.v;
+
+				// NOTE: We will accept it as pixel mapped if only one dimension is stretched. This fixes dialog frames in FFI.
+				// Though, there could be false positives in other games due to this. Let's see if it is a problem...
+				if (dx <= 0 || dy <= 0 || (dx != du && dy != dv)) {
+					pixelMapped = false;
+					break;
+				}
+			}
+		}
+	}
+
+	float spriteBorderFixL = 0.0f;
+	float spriteBorderFixR = 0.0f;
+	float spriteBorderFixT = 0.0f;
+	float spriteBorderFixB = 0.0f;
+	const float spriteBorderFix = PSP_CoreParameter().compat.flags().SpriteBorderFix;
+	if (pixelMapped || (spriteBorderFix && !ShouldApplySpriteBorderFix(gstate))) {
+		// Don't apply spriteBorderFix if pixel mapped. 
+	} else {
+		if (spriteBorderFix < 0.0f) {
+			spriteBorderFixL = (-spriteBorderFix / uScale) / gstate_c.curTextureWidth;
+			spriteBorderFixT = (-spriteBorderFix / vScale) / gstate_c.curTextureHeight;
+			spriteBorderFixR = (-spriteBorderFix / uScale) / gstate_c.curTextureWidth;
+			spriteBorderFixB = (-spriteBorderFix / vScale) / gstate_c.curTextureHeight;
+		} else if (spriteBorderFix > 0.0f) {
+			spriteBorderFixL = 0.0f;
+			spriteBorderFixR = (spriteBorderFix / uScale) / gstate_c.curTextureWidth;
+			spriteBorderFixT = 0.0f;
+			spriteBorderFixB = (spriteBorderFix / vScale) / gstate_c.curTextureHeight;
+		}
+	}
+
 
 	for (int i = 0; i < vertexCount; i += 2) {
 		const TransformedVertex &transVtxTL = transformed[indsIn[i + 0]];
 		const TransformedVertex &transVtxBR = transformed[indsIn[i + 1]];
 
-		if (pixelMapped) {
-			float dx = transVtxBR.x - transVtxTL.x;
-			float dy = transVtxBR.y - transVtxTL.y;
-			float du = transVtxBR.u - transVtxTL.u;
-			float dv = transVtxBR.v - transVtxTL.v;
-
-			// NOTE: We will accept it as pixel mapped if only one dimension is stretched. This fixes dialog frames in FFI.
-			// Though, there could be false positives in other games due to this. Let's see if it is a problem...
-			if (dx <= 0 || dy <= 0 || (dx != du && dy != dv)) {
-				pixelMapped = false;
-			}
-		}
-
 		float z = transVtxBR.z;
 		// Apply Z clamping. It appears clipping/culling does not affect rectangles, see #12058.
+		// TODO: We might want to make this 65536.999. Since those will pass, and if a game mixes through and non-through...
 		if (z > 65535.0f) {
 			z = 65535.0f;
 		} else if (z < 0.0f) {
@@ -891,33 +1045,34 @@ static bool ExpandRectangles(int vertexCount, int &numDecodedVerts, int vertsSiz
 
 		// bottom right
 		trans[0] = transVtxBR;
-		trans[0].u = transVtxBR.u * uscale;
-		trans[0].v = transVtxBR.v * vscale;
+		trans[0].u = (transVtxBR.u - spriteBorderFixR) * uScale;
+		trans[0].v = (transVtxBR.v - spriteBorderFixB) * vScale;
 		trans[0].z = z;
 
 		// top right
 		trans[1] = transVtxBR;
 		trans[1].y = transVtxTL.y;
-		trans[1].u = transVtxBR.u * uscale;
-		trans[1].v = transVtxTL.v * vscale;
+		trans[1].u = (transVtxBR.u - spriteBorderFixR) * uScale;
+		trans[1].v = (transVtxTL.v + spriteBorderFixT) * vScale;
 		trans[1].z = z;
 
 		// top left
 		trans[2] = transVtxBR;
 		trans[2].x = transVtxTL.x;
 		trans[2].y = transVtxTL.y;
-		trans[2].u = transVtxTL.u * uscale;
-		trans[2].v = transVtxTL.v * vscale;
+		trans[2].u = (transVtxTL.u + spriteBorderFixL) * uScale;
+		trans[2].v = (transVtxTL.v + spriteBorderFixT) * vScale;
 		trans[2].z = z;
 
 		// bottom left
 		trans[3] = transVtxBR;
 		trans[3].x = transVtxTL.x;
-		trans[3].u = transVtxTL.u * uscale;
-		trans[3].v = transVtxBR.v * vscale;
+		trans[3].u = (transVtxTL.u + spriteBorderFixL) * uScale;
+		trans[3].v = (transVtxBR.v - spriteBorderFixB) * vScale;
 		trans[3].z = z;
 
 		// That's the four corners. Now process UV rotation.
+		// TODO: Should we apply the sprite border fix before or after rotation? Likely after, right?
 		RotateUV(trans);
 
 		// Triangle: BR-TR-TL
@@ -1104,7 +1259,7 @@ static bool ExpandLines(int vertexCount, int &numDecodedVerts, int vertsSize, u1
 	return true;
 }
 
-static bool ExpandPoints(int vertexCount, int &maxIndex, int vertsSize, u16 *&inds, int indsSize, const TransformedVertex *transformed, TransformedVertex *transformedExpanded, int *drawIndexCount, bool throughmode) {
+static bool ExpandPoints(int vertexCount, int &maxIndex, int vertsSize, u16 *&inds, int indsSize, const TransformedVertex *transformed, TransformedVertex *transformedExpanded, int *drawIndexCount, bool throughmode, float pointScale) {
 	// Before we start, do a sanity check - does the output fit?
 	if (vertexCount * 6 > indsSize) {
 		// Won't fit, kill the draw.
@@ -1121,21 +1276,22 @@ static bool ExpandPoints(int vertexCount, int &maxIndex, int vertsSize, u16 *&in
 	u16 *newInds = inds + vertexCount;
 	u16 *indsOut = newInds;
 
-	float dx = 1.0f * gstate_c.vpWidthScale * (1.0f / gstate.getViewportXScale());
-	float dy = 1.0f * gstate_c.vpHeightScale * (1.0f / gstate.getViewportYScale());
-	float du = 1.0f / gstate_c.curTextureWidth;
-	float dv = 1.0f / gstate_c.curTextureHeight;
+	const float offset = pointScale != 1.0f ? -pointScale * 0.5f : 0.0f;
 
-	if (throughmode) {
-		dx = 1.0f;
-		dy = 1.0f;
-	}
+	const float dx = 1.0f * pointScale;
+	const float dy = 1.0f * pointScale;
+
+	const float du = 1.0f / gstate_c.curTextureWidth;
+	const float dv = 1.0f / gstate_c.curTextureHeight;
 
 	maxIndex = 4 * vertexCount;
 	for (int i = 0; i < vertexCount; ++i) {
-		const TransformedVertex &transVtxTL = transformed[indsIn[i]];
+		TransformedVertex transVtxTL = transformed[indsIn[i]];
+		// Centering, if the logic below enables it.
+		transVtxTL.x += offset;
+		transVtxTL.y += offset;
 
-		// Create the bottom right version.
+		// Create the bottom right corner.
 		TransformedVertex transVtxBR = transVtxTL;
 		transVtxBR.x += dx;
 		transVtxBR.y += dy;
@@ -1173,6 +1329,7 @@ static bool ExpandPoints(int vertexCount, int &maxIndex, int vertsSize, u16 *&in
 		indsOut[3] = i * 4 + 3;
 		indsOut[4] = i * 4 + 0;
 		indsOut[5] = i * 4 + 2;
+
 		trans += 4;
 		indsOut += 6;
 	}
@@ -1185,13 +1342,13 @@ static bool ExpandPoints(int vertexCount, int &maxIndex, int vertsSize, u16 *&in
 // The rest of the transform pipeline like lighting will go as normal, either hardware or software.
 // The implementation is initially a bit inefficient but shouldn't be a big deal.
 // An intermediate buffer of not-easy-to-predict size is stored at bufPtr.
-u32 NormalizeVertices(SimpleVertex *sverts, u8 *bufPtr, const u8 *inPtr, int lowerBound, int upperBound, const VertexDecoder *dec, u32 vertType) {
+u32 NormalizeVertices(SimpleVertex *sverts, u8 *bufPtr, const u8 *inPtr, int lowerBound, int upperBound, const UVScale &uvScale, const VertexDecoder *dec, u32 vertType) {
 	// First, decode the vertices into a GPU compatible format. This step can be eliminated but will need a separate
 	// implementation of the vertex decoder.
 	// Actually if software transform is off, we could enforce it in the vertex decoder lookup before calling this,
 	// avoiding having to implement it again below.
 	const int count = upperBound + 1 - lowerBound;
-	dec->DecodeVerts(bufPtr, inPtr + lowerBound * dec->VertexSize(), &gstate_c.uv, count);
+	dec->DecodeVerts(bufPtr, inPtr + lowerBound * dec->VertexSize(), &uvScale, count);
 
 	// OK, morphing eliminated but bones still remain to be taken care of.
 	// Let's do a partial software transform where we only do skinning.
@@ -1314,7 +1471,7 @@ static Vec3f ScreenToDrawing(const Vec3f& coords) {
 // This is really just for vertex preview in the debugger, not for actual rendering!
 // TODO: Support tessellation!! That's currently entirely broken (I guess maybe we'll draw the control points as something).
 // count is the input vertex count (describes the draw together with prim).
-bool GetCurrentDrawAsDebugVertices(DrawEngineCommon *drawEngine, GEPrimitiveType prim, GEPrimitiveType *outPrim, int count, std::vector<GPUDebugVertex> &debugVertices, std::vector<u16> &debugIndices, int *outLowerIndexBound, TransformStats *stats, DebugVertexFlags flags) {
+bool GetCurrentDrawAsDebugVertices(DrawEngineCommon *drawEngine, GECommand cmd, GEPrimitiveType prim, GEPrimitiveType *outPrim, int count, std::vector<GPUDebugVertex> *debugVertices, std::vector<u16> *debugIndices, int *outLowerIndexBound, TransformStats *stats, DebugVertexFlags flags) {
 	// This is always for the current vertices.
 	u16 indexLowerBound = 0;
 	u16 indexUpperBound = count - 1;
@@ -1327,7 +1484,7 @@ bool GetCurrentDrawAsDebugVertices(DrawEngineCommon *drawEngine, GEPrimitiveType
 		return false;
 	}
 
-	const u32 vertTypeID = GetVertTypeID(gstate.vertType, gstate.getUVGenMode(), true);
+	const u32 vertTypeID = GetVertTypeID(gstate.vertType, gstate.getUVGenMode());
 	const bool throughMode = (vertTypeID & GE_VTYPE_THROUGH) != 0;
 
 	// Points is the only primitive that generates 6x as many vertices as input indices (2 triangles per point).
@@ -1351,7 +1508,7 @@ bool GetCurrentDrawAsDebugVertices(DrawEngineCommon *drawEngine, GEPrimitiveType
 		indexLowerBound = 0;
 	}
 
-	int verticesToDecode = indexUpperBound + 1 - indexLowerBound;
+	const int verticesToDecode = indexUpperBound + 1 - indexLowerBound;
 
 	const u8 *verts = Memory::GetPointerUnchecked(gstate_c.vertexAddr);
 
@@ -1362,12 +1519,10 @@ bool GetCurrentDrawAsDebugVertices(DrawEngineCommon *drawEngine, GEPrimitiveType
 	const int stride = (int)dec->GetDecVtxFmt().stride;
 	vertsTemp.resize(stride * verticesToDecode + 32);  // Add some padding bytes for "over-writes".
 
-	UVScale uvScale{};
-	LoadUVScaleOffsetVec(gstate).Store(&uvScale.uScale);
-
 	const u8 *startPos = verts + indexLowerBound * dec->VertexSize();
 
 	bool savedVertexFullAlpha = gstate_c.vertexFullAlpha;
+	const UVScale uvScale = LoadUVScaleOffset(gstate);
 	dec->DecodeVerts(vertsTemp.data(), startPos, &uvScale, verticesToDecode);
 	gstate_c.vertexFullAlpha = savedVertexFullAlpha;
 
@@ -1377,7 +1532,7 @@ bool GetCurrentDrawAsDebugVertices(DrawEngineCommon *drawEngine, GEPrimitiveType
 	if (!(flags & DebugVertexFlags::Transformed)) {
 		// Output the untransformed vertices (although with skinning and morph baked-in from decode),
 		// and the original indices. Might be interesting to look at.
-		debugVertices.resize(verticesToDecode);
+		debugVertices->resize(verticesToDecode);
 		VertexReader reader(vertsTemp.data(), dec->GetDecVtxFmt(), vertTypeID);
 
 		const u8 defaultColor[4] = {
@@ -1389,7 +1544,7 @@ bool GetCurrentDrawAsDebugVertices(DrawEngineCommon *drawEngine, GEPrimitiveType
 
 		for (int i = 0; i < verticesToDecode; i++) {
 			reader.Goto(i);
-			GPUDebugVertex &sv = debugVertices[i];
+			GPUDebugVertex &sv = (*debugVertices)[i];
 			sv = {};
 			if (vertTypeID & GE_VTYPE_TC_MASK) {
 				reader.ReadUV(&sv.u);
@@ -1421,30 +1576,35 @@ bool GetCurrentDrawAsDebugVertices(DrawEngineCommon *drawEngine, GEPrimitiveType
 		// Output the indices straight
 		switch (vertTypeID & GE_VTYPE_IDX_MASK) {
 		case GE_VTYPE_IDX_NONE:
-			debugIndices.clear();  // it's just a sequence, effectively.
+			debugIndices->clear();  // it's just a sequence, effectively.
 			break;
 		case GE_VTYPE_IDX_8BIT:
-			debugIndices.resize(verticesToDecode);
+			debugIndices->resize(verticesToDecode);
 			for (int i = 0; i < verticesToDecode; i++) {
-				debugIndices[i] = ((const u8 *)indsPtr)[i];
+				(*debugIndices)[i] = ((const u8 *)indsPtr)[i];
 			}
 			break;
 		case GE_VTYPE_IDX_16BIT:
-			debugIndices.resize(verticesToDecode);
+			debugIndices->resize(verticesToDecode);
 			for (int i = 0; i < verticesToDecode; i++) {
-				debugIndices[i] = ((const u16_le *)indsPtr)[i];
+				(*debugIndices)[i] = ((const u16_le *)indsPtr)[i];
 			}
 			break;
 		case GE_VTYPE_IDX_32BIT:
-			debugIndices.resize(verticesToDecode);
+			debugIndices->resize(verticesToDecode);
 			for (int i = 0; i < verticesToDecode; i++) {
-				debugIndices[i] = ((const u32_le *)indsPtr)[i];
+				(*debugIndices)[i] = ((const u32_le *)indsPtr)[i];
 			}
 			break;
 		}
 
 		*outLowerIndexBound = indexLowerBound;
 		*outPrim = prim;  // before it changes.
+
+		if (stats) {
+			// We're not running transform, so no stats.
+			*stats = {};
+		}
 		return true;
 	}
 
@@ -1469,7 +1629,7 @@ bool GetCurrentDrawAsDebugVertices(DrawEngineCommon *drawEngine, GEPrimitiveType
 		break;
 	}
 
-	// After this, strips and fans have been collapsed to triangles.
+	// After index generation, strips and fans have been collapsed to triangles.
 	switch (prim) {
 	case GE_PRIM_LINE_STRIP:
 		prim = GE_PRIM_LINES;
@@ -1477,6 +1637,8 @@ bool GetCurrentDrawAsDebugVertices(DrawEngineCommon *drawEngine, GEPrimitiveType
 	case GE_PRIM_TRIANGLE_FAN:
 	case GE_PRIM_TRIANGLE_STRIP:
 		prim = GE_PRIM_TRIANGLES;
+		break;
+	default:
 		break;
 	}
 
@@ -1492,14 +1654,18 @@ bool GetCurrentDrawAsDebugVertices(DrawEngineCommon *drawEngine, GEPrimitiveType
 	params.decoded = vertsTemp.data();
 	params.transformed = transformed.data();
 	params.transformedExpanded = transformedExpanded.data();
+	params.pointScale = cmd == GE_CMD_BOUNDINGBOX ? 4.0f : 1.0f;  // Just make them more visible, for eas of debugging.
 
 	RunSoftwareTransform(params, prim, vertTypeID, dec->GetDecVtxFmt(), numDecodedVerts, 65536, generatedIndices, inds, (int)indexTemp.size(), &result);
 
 	// Output of software transform is always an indexed triangle list (or nothing).
 	if (result.drawIndexCount == 0) {
-		// Not a failue, but everything got culled.
-		debugVertices.clear();
-		debugIndices.clear();
+		// Not a failure, but everything got culled.
+		debugVertices->clear();
+		debugIndices->clear();
+		if (stats) {
+			*stats = result.stats;
+		}
 		return true;
 	}
 
@@ -1513,18 +1679,18 @@ bool GetCurrentDrawAsDebugVertices(DrawEngineCommon *drawEngine, GEPrimitiveType
 	gstate_c.vertexFullAlpha = savedVertexFullAlpha;
 
 	// Supply indices in a correctly-sized vector.
-	debugIndices.resize(result.drawIndexCount);
-	memcpy(debugIndices.data(), inds, result.drawIndexCount * sizeof(u16));
+	debugIndices->resize(result.drawIndexCount);
+	memcpy(debugIndices->data(), inds, result.drawIndexCount * sizeof(u16));
 
 	const bool applyOffset = (flags & DebugVertexFlags::DrawCoords) && !throughMode;
 	const float offsetX = applyOffset ? -gstate.getOffsetX() : 0.0f;
 	const float offsetY = applyOffset ? -gstate.getOffsetY() : 0.0f;
 
 	// Convert the transformed vertices to the debug vertex format.
-	debugVertices.resize(result.drawVertexCount);
+	debugVertices->resize(result.drawVertexCount);
 	for (int i = 0; i < result.drawVertexCount; i++) {
 		const TransformedVertex &vtx = result.drawBuffer[i];
-		GPUDebugVertex &dv = debugVertices[i];
+		GPUDebugVertex &dv = (*debugVertices)[i];
 		dv.x = vtx.x + offsetX;
 		dv.y = vtx.y + offsetY;
 		dv.z = vtx.z;

@@ -18,6 +18,7 @@
 
 enum SystemPermission {
 	SYSTEM_PERMISSION_STORAGE,
+	SYSTEM_PERMISSION_LOCAL_NETWORK,
 };
 
 enum PermissionStatus {
@@ -155,6 +156,8 @@ enum SystemProperty {
 	SYSPROP_HAS_ADDITIONAL_STORAGE,
 	SYSPROP_ADDITIONAL_STORAGE_DIRS,
 	SYSPROP_TEMP_DIRS,
+	
+	SYSPROP_CAN_GET_FREE_SPACE_FAST,
 
 	SYSPROP_HAS_FILE_BROWSER,
 	SYSPROP_HAS_FOLDER_BROWSER,
@@ -242,9 +245,12 @@ enum SystemProperty {
 	SYSPROP_USE_APP_STORE,
 	SYSPROP_SUPPORTS_SHARE_TEXT,
 
+	SYSPROP_CAN_RESTRICT_ORIENTATION,
+
 	SYSPROP_INSTALLER_NAME,  // Useful on Android to check if we were installed from the play store.
 };
 
+// NOTE: Unlike requests or UIMessage, these are synchronous!
 enum class SystemNotification {
 	UI,
 	MEM_VIEW,
@@ -268,6 +274,8 @@ enum class SystemNotification {
 	AUDIO_MODE_CHANGED,
 	APP_SWITCH_MODE_CHANGED,
 	PAD_STATE_CHANGED,
+	CONFIG_LOADED,
+	BEFORE_CONFIG_SAVE_ON_EXIT,
 };
 
 // I guess it's not super great architecturally to centralize this, since it's not general - but same with a lot of

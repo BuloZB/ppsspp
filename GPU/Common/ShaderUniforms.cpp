@@ -32,7 +32,7 @@ void UpdateRotation(float rotMatrix[4], bool useBufferedRendering) {
 	}
 }
 
-void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool useBufferedRendering) {
+void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool useBufferedRendering, bool pixelMapped) {
 	if (dirtyUniforms & DIRTY_TEXENV) {
 		Uint8x3ToFloat3(ub->texEnvColor, gstate.texenvcolor);
 	}
@@ -76,11 +76,11 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool useBuffe
 		ub->rotation = useBufferedRendering ? 0 : (float)g_display.rotation;
 	}
 
-	if (dirtyUniforms & DIRTY_PROJTHROUGHMATRIX) {
+	if (dirtyUniforms & DIRTY_FRAMEBUFFER_DIM) {
 		ub->xywh[0] = (float)gstate_c.curRTOffsetX;
 		ub->xywh[1] = (float)gstate_c.curRTOffsetY;
-		ub->xywh[2] = (float)gstate_c.curRTWidth;
-		ub->xywh[3] = (float)gstate_c.curRTHeight;
+		ub->xywh[2] = (float)(2.0 / gstate_c.curRTWidth);  // intentionally do double precision here.
+		ub->xywh[3] = (float)(2.0 / gstate_c.curRTHeight);
 
 		ub->rotation = useBufferedRendering ? 0 : (float)g_display.rotation;
 	}
@@ -90,13 +90,11 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool useBuffe
 		ub->rasterOffset[1] = gstate.getOffsetY();
 		ub->minZmaxZ[0] = (float)gstate.getDepthRangeMin();
 		ub->minZmaxZ[1] = (float)gstate.getDepthRangeMax();
-
 		// test sine wave
 		// ub->minZmaxZ[0] = (sin(time_now_d()) * 0.5f + 0.5f) * 65536.0;
 	}
 
 	if (dirtyUniforms & DIRTY_VIEWPORT_UNIFORMS) {
-		// TODO: This should be a couple of SIMD instructions.
 		Vec4F32 vpScale = Vec4F32::LoadF24x4(&gstate.viewportxscale);
 		Vec4F32 vpOffset = Vec4F32::LoadF24x4(&gstate.viewportxcenter);
 		vpScale.Store(ub->vpScale);
@@ -118,25 +116,12 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool useBuffe
 	}
 
 	if (dirtyUniforms & DIRTY_FOGCOEF) {
-		float fogcoef[2] = {
-			getFloat24(gstate.fog1),
-			getFloat24(gstate.fog2),
-		};
-		// The PSP just ignores infnan here (ignoring IEEE), so take it down to a valid float.
-		// Workaround for https://github.com/hrydgard/ppsspp/issues/5384#issuecomment-38365988
-		if (my_isnanorinf(fogcoef[0])) {
-			// Not really sure what a sensible value might be, but let's try 64k.
-			fogcoef[0] = std::signbit(fogcoef[0]) ? -65535.0f : 65535.0f;
-		}
-		if (my_isnanorinf(fogcoef[1])) {
-			fogcoef[1] = std::signbit(fogcoef[1]) ? -65535.0f : 65535.0f;
-		}
-		CopyFloat2(ub->fogCoef, fogcoef);
+		UpdateFogCoef(gstate, ub->fogCoef);
 	}
 
 	if (dirtyUniforms & DIRTY_TEX_ALPHA_MUL) {
 		bool doTextureAlpha = gstate.isTextureAlphaUsed();
-		if (gstate_c.textureFullAlpha && gstate.getTextureFunction() != GE_TEXFUNC_REPLACE) {
+		if (gstate_c.textureSolidAlpha && gstate.getTextureFunction() != GE_TEXFUNC_REPLACE) {
 			doTextureAlpha = false;
 		}
 		ub->texNoAlpha = doTextureAlpha ? 0.0f : 1.0f;
@@ -158,46 +143,41 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool useBuffe
 
 	// Texturing
 	if (dirtyUniforms & DIRTY_UVSCALEOFFSET) {
-		float widthFactor = 1.0f;
-		float heightFactor = 1.0f;
-		if (gstate_c.textureIsFramebuffer) {
-			const float invW = 1.0f / (float)gstate_c.curTextureWidth;
-			const float invH = 1.0f / (float)gstate_c.curTextureHeight;
-			const int w = gstate.getTextureWidth(0);
-			const int h = gstate.getTextureHeight(0);
-			widthFactor = (float)w * invW;
-			heightFactor = (float)h * invH;
-		}
-		if (gstate_c.submitType == SubmitType::HW_BEZIER || gstate_c.submitType == SubmitType::HW_SPLINE) {
-			// When we are generating UV coordinates through the bezier/spline, we need to apply the scaling.
-			// However, this is missing a check that we're not getting our UV:s supplied for us in the vertices.
-			ub->uvScaleOffset[0] = gstate_c.uv.uScale * widthFactor;
-			ub->uvScaleOffset[1] = gstate_c.uv.vScale * heightFactor;
-			ub->uvScaleOffset[2] = gstate_c.uv.uOff * widthFactor;
-			ub->uvScaleOffset[3] = gstate_c.uv.vOff * heightFactor;
-		} else {
-			ub->uvScaleOffset[0] = widthFactor;
-			ub->uvScaleOffset[1] = heightFactor;
-			ub->uvScaleOffset[2] = 0.0f;
-			ub->uvScaleOffset[3] = 0.0f;
-		}
-	}
-
-	if (dirtyUniforms & DIRTY_BEZIERSPLINE) {
-		ub->spline_counts = gstate_c.spline_num_points_u;
+		UpdateUVScaleOff(gstate, ub->uvScaleOffset);
 	}
 
 	if (dirtyUniforms & DIRTY_DEPAL) {
-		int indexMask = gstate.getClutIndexMask();
-		int indexShift = gstate.getClutIndexShift();
-		int indexOffset = gstate.getClutIndexStartPos() >> 4;
-		int format = gstate_c.depalFramebufferFormat;
-		uint32_t val = BytesToUint32(indexMask, indexShift, indexOffset, format);
-		// Poke in a bilinear filter flag in the top bit.
-		if (gstate.isMagnifyFilteringEnabled())
-			val |= 0x80000000;
-		ub->depal_mask_shift_off_fmt = val;
+		ub->depal_mask_shift_off_fmt = PackDepalBits(pixelMapped);
 	}
+}
+
+uint32_t PackDepalBits(bool pixelMapped) {
+	const int indexMask = gstate.getClutIndexMask();
+	const int indexShift = gstate.getClutIndexShift();
+	const int indexOffset = gstate.getClutIndexStartPos() >> 4;
+	const int format = gstate_c.depalTextureFormat;
+	uint32_t val = BytesToUint32(indexMask, indexShift, indexOffset, format);
+	// NOTE: This must follow similar logic to TextureCacheCommon::GetSamplingParams -
+	// maybe we can share it somehow.
+	// TOOD: Handle replaced textures.
+	bool bilinear = gstate.isMagnifyFilteringEnabled() && !pixelMapped;
+	switch (g_Config.iTexFiltering) {
+	case TEX_FILTER_FORCE_NEAREST:
+		bilinear = false;
+		break;
+	case TEX_FILTER_FORCE_LINEAR:
+		if (CanForceBilinear(gstate)) {
+			bilinear = true;
+		}
+		break;
+	default:
+		break;
+	}
+	if (bilinear) {
+		// Poke in a bilinear filter flag in the top bit.
+		val |= 0x80000000;
+	}
+	return val;
 }
 
 // For "light ubershader" bits.
@@ -264,10 +244,16 @@ void LightUpdateUniforms(UB_VS_Lights *ub, uint64_t dirtyUniforms) {
 	}
 }
 
-void BoneUpdateUniforms(UB_VS_Bones *ub, uint64_t dirtyUniforms) {
-	for (int i = 0; i < 8; i++) {
-		if (dirtyUniforms & (DIRTY_BONEMATRIX0 << i)) {
-			ConvertMatrix4x3To3x4Transposed(ub->bones[i], gstate.boneMatrix + 12 * i);
-		}
+void UpdateFogCoef(const GEState &state, float fogCoef[2]) {
+	fogCoef[0] = getFloat24(gstate.fog1);
+	fogCoef[1] = getFloat24(gstate.fog2);
+	// The PSP just ignores infnan here (ignoring IEEE), so take it down to a valid float.
+	// Workaround for https://github.com/hrydgard/ppsspp/issues/5384#issuecomment-38365988
+	if (my_isnanorinf(fogCoef[0])) {
+		// Not really sure what a sensible value might be, but let's try 64k.
+		fogCoef[0] = std::signbit(fogCoef[0]) ? -65535.0f : 65535.0f;
+	}
+	if (my_isnanorinf(fogCoef[1])) {
+		fogCoef[1] = std::signbit(fogCoef[1]) ? -65535.0f : 65535.0f;
 	}
 }

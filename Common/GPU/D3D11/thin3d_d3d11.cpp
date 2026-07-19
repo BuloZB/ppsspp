@@ -342,6 +342,7 @@ D3D11DrawContext::D3D11DrawContext(ComPtr<ID3D11Device> device, ComPtr<ID3D11Dev
 	caps_.fragmentShaderStencilWriteSupported = false;
 	caps_.blendMinMaxSupported = true;
 	caps_.multiSampleLevelsMask = 1;   // More could be supported with some work.
+	caps_.samplerLodControl = true;
 
 	caps_.provokingVertexLast = false;  // D3D has it first, unfortunately. (and no way to change it).
 
@@ -1819,7 +1820,7 @@ bool D3D11DrawContext::CopyFramebufferToMemory(Framebuffer *src, Aspect channelB
 	const uint8_t *srcWithOffset = (const uint8_t *)map.pData + srcByteOffset;
 	switch ((Aspect)channelBits) {
 	case Aspect::COLOR_BIT:
-		// Pixel size always 4 here because we always request BGRA8888.
+		// Pixel size always 4 here because we always request RGBA8888.
 		ConvertFromRGBA8888((uint8_t *)pixels, srcWithOffset, pixelStride, map.RowPitch / sizeof(uint32_t), bw, bh, destFormat);
 		break;
 	case Aspect::DEPTH_BIT:

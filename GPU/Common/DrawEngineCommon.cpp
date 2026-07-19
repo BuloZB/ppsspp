@@ -51,6 +51,12 @@ DrawEngineCommon::DrawEngineCommon() : decoderMap_(32) {
 	transformedExpanded_ = (TransformedVertex *)AllocateMemoryPages(3 * TRANSFORMED_VERTEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 	decoded_ = (u8 *)AllocateMemoryPages(DECODED_VERTEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 	decIndex_ = (u16 *)AllocateMemoryPages(DECODED_INDEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
+
+	_dbg_assert_(transformed_);
+	_dbg_assert_(transformedExpanded_);
+	_dbg_assert_(decoded_);
+	_dbg_assert_(decIndex_);
+
 	indexGen.Setup(decIndex_);
 
 	InitDepthRaster();
@@ -109,7 +115,6 @@ void DrawEngineCommon::NotifyConfigChanged() {
 	decoderMap_.Clear();
 
 	useHWTransform_ = g_Config.bHardwareTransform;
-	useHWTessellation_ = UpdateUseHWTessellation(g_Config.bHardwareTessellation);
 }
 
 void DrawEngineCommon::DispatchSubmitImm(GEPrimitiveType prim, TransformedVertex *buffer, int vertexCount, int cullMode, bool continuation) {
@@ -153,7 +158,7 @@ void DrawEngineCommon::DispatchSubmitImm(GEPrimitiveType prim, TransformedVertex
 	}
 
 	int bytesRead;
-	uint32_t vertTypeID = GetVertTypeID(vtype, 0, applySkinInDecode_);
+	uint32_t vertTypeID = GetVertTypeID(vtype, 0);
 
 	bool clockwise = !gstate.isCullEnabled() || gstate.getCullMode() == cullMode;
 	VertexDecoder *dec = GetVertexDecoder(vertTypeID);
@@ -179,23 +184,26 @@ void DrawEngineCommon::DispatchSubmitImm(GEPrimitiveType prim, TransformedVertex
 //   - Only requires six plane evaluations then.
 bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int vertexCount, const VertexDecoder *dec, u32 vertType) {
 	// Grab temp buffer space from large offsets in decoded_. Not exactly safe for large draws.
-	if (vertexCount > 1024) {
+	// Although this may lead to drawing that shouldn't happen, the viewport is more complex on VR.
+	// Let's always say objects are within bounds.
+	if (vertexCount > 1024 || gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
 		return true;
 	}
 
 	SimpleVertex *corners = (SimpleVertex *)(decoded_ + 65536 * 12);
 	float *verts = (float *)(decoded_ + 65536 * 18);
 
-	// Although this may lead to drawing that shouldn't happen, the viewport is more complex on VR.
-	// Let's always say objects are within bounds.
-	if (gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
-		return true;
-	}
-
 	// Try to skip NormalizeVertices if it's pure positions. No need to bother with a vertex decoder
 	// and a large vertex format.
+
+	// BBOX games:
+	// - Outrun 2006
+	// - Tekken 6  (FLOAT only)
+	// - Smash Court Tennis 3 (All formats)
+	// - Need for Speed Carbon
+
 	if ((vertType & 0xFFFFFF) == GE_VTYPE_POS_FLOAT && !inds) {
-		// Most games that use bbox use floating point bboxes (Outrun, Tekken 6 etc).
+		// Most games that use bbox use floating point bboxes (Outrun, Tekken 6, Smash Court Tennis 3, Need for Speed Carbon etc).
 		// memcpy(verts, vdata, sizeof(float) * 3 * vertexCount);
 		verts = (float *)vdata;
 	} else if ((vertType & 0xFFFFFF) == GE_VTYPE_POS_8BIT && !inds) {
@@ -213,6 +221,8 @@ bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int 
 		u8 *temp_buffer = decoded_ + 65536 * 24;
 
 		if ((inds || (vertType & (GE_VTYPE_WEIGHT_MASK | GE_VTYPE_MORPHCOUNT_MASK)))) {
+			// Need for Speed Carbon ends up on this path! With a single bone weight.
+
 			u16 indexLowerBound = 0;
 			u16 indexUpperBound = (u16)vertexCount - 1;
 
@@ -220,9 +230,9 @@ bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int 
 				GetIndexBounds(inds, vertexCount, vertType, &indexLowerBound, &indexUpperBound);
 			}
 			// TODO: Avoid normalization if just plain skinning.
-			// Force software skinning.
-			const u32 vertTypeID = GetVertTypeID(vertType, gstate.getUVGenMode(), true);
-			::NormalizeVertices(corners, temp_buffer, (const u8 *)vdata, indexLowerBound, indexUpperBound, dec, vertType);
+			const u32 vertTypeID = GetVertTypeID(vertType, gstate.getUVGenMode());
+			UVScale uvScale{};  // We don't care about UV.
+			::NormalizeVertices(corners, temp_buffer, (const u8 *)vdata, indexLowerBound, indexUpperBound, uvScale, dec, vertType);
 			IndexConverter conv(vertType, inds);
 			for (int i = 0; i < vertexCount; i++) {
 				verts[i * 3] = corners[conv(i)].pos.x;
@@ -259,9 +269,9 @@ bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int 
 	}
 
 	// Unclear why the top/left is off by a pixel.
-	const int left = gstate.getOffsetX() + std::max(gstate.getRegionX1(), gstate.getScissorX1()) - 1;
-	const int top = gstate.getOffsetY() + std::max(gstate.getRegionY1(), gstate.getScissorY1()) - 1;
-	const int right = gstate.getOffsetX() + std::min(gstate.getRegionX2(), gstate.getScissorX2()) + 1;
+	const int left   = gstate.getOffsetX() + std::max(gstate.getRegionX1(), gstate.getScissorX1()) - 1;
+	const int top    = gstate.getOffsetY() + std::max(gstate.getRegionY1(), gstate.getScissorY1()) - 1;
+	const int right  = gstate.getOffsetX() + std::min(gstate.getRegionX2(), gstate.getScissorX2()) + 1;
 	const int bottom = gstate.getOffsetY() + std::min(gstate.getRegionY2(), gstate.getScissorY2()) + 1;
 
 	// This is strange, it seems if the draw box is at all outside the 4096x4096 coordinate space, all checks pass.
@@ -271,6 +281,7 @@ bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int 
 	}
 
 	// TODO: How accurate should we be?
+	// TODO: Use CrossSIMD.
 	int insideCount[6] = {0};
 	for (int i = 0; i < vertexCount; i++) {
 		// Complete the transform to see if the vertex should be ignored. Not sure if we need to go to these lengths...
@@ -286,26 +297,27 @@ bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int 
 			insideCount[5]++;
 		}
 
-		const float invW = 1.0f / projpos[3];
+		const float w = projpos[3];
+		// const float invW = 1.0f / w;
 		const float screenpos[3] = {
-			projpos[0] * gstate.getViewportXScale() * invW + gstate.getViewportXCenter(),
-			projpos[1] * gstate.getViewportYScale() * invW + gstate.getViewportYCenter(),
-			projpos[2] * gstate.getViewportZScale() * invW + gstate.getViewportZCenter(),
+			(projpos[0] * gstate.getViewportXScale()) + gstate.getViewportXCenter() * w,
+			(projpos[1] * gstate.getViewportYScale()) + gstate.getViewportYCenter() * w,
+			(projpos[2] * gstate.getViewportZScale()) + gstate.getViewportZCenter() * w,
 		};
 
 		const float drawX = screenpos[0];
 		const float drawY = screenpos[1];
 
-		if (drawX >= left) {
+		if (drawX >= left * w) {
 			insideCount[0]++;
 		}
-		if (drawX <= right) {
+		if (drawX <= right * w) {
 			insideCount[1]++;
 		}
-		if (drawY >= top) {
+		if (drawY >= top * w) {
 			insideCount[2]++;
 		}
-		if (drawY <= bottom) {
+		if (drawY <= bottom * w) {
 			insideCount[3]++;
 		}
 	}
@@ -322,6 +334,7 @@ bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int 
 
 	for (int i = 0; i < countToCheck; i++) {
 		if (insideCount[i] == 0) {
+			// All verts were outside one side.
 			return false;
 		}
 	}
@@ -329,15 +342,15 @@ bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int 
 	return true;
 }
 
-// This optionally culls collections of points against the four side planes, and always computes the min and max of Z and W.
+// This optionally culls collections of points against the six planes, and always computes the min and max of Z and W.
 //
 // The result of that is then used to determine if we need to drop down to software transform+clip or we can hand
 // off to hardware, with whatever capabilities are available.
 //
 // NOTE: This doesn't handle through-mode or indexing (morph or skinning can be handled if they're implemented in software during decode).
-template<u32 posFmt>
-static bool TestBoundingBoxFast(const float *worldViewProj, const void *vdata, int vertexCount, const VertexDecoder *dec, u8 *decoded, ClipInfoFlags *clipInfoFlags) {
-	Mat4F32 worldViewProjMat(worldViewProj);
+template<u32 posFmt, u32 idxFmt>
+static bool TestBoundingBoxFast(const float *cullMatrix, const void *vdata, const void *idata, int vertexCount, const VertexDecoder *dec, ClipInfoFlags *clipInfoFlags) {
+	Mat4F32 cullMat(cullMatrix);
 	alignas(16) static const float planesXYData[4] = { 1, -1, 1, -1 };
 	Vec4F32 planesXY = Vec4F32::LoadAligned(planesXYData);
 	Vec4S32 insideMaskXY = Vec4S32::Zero();
@@ -347,17 +360,40 @@ static bool TestBoundingBoxFast(const float *worldViewProj, const void *vdata, i
 	// Used to reduce the Z precision. This effectively implements the small offsets where Z can be very slightly outside -1..1.
 	// In reality we should probably affect X and Y too, but meh.
 	alignas(16) static const u32 vertexMaskData[4] = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFF00, 0xFFFFFFFF};
-	Vec4S32 vertexMask = Vec4S32::LoadAligned((const int *)vertexMaskData);
 	const int stride = dec->VertexSize();
-	const int offset = dec->posoff;
-	const s8 *data = (const s8 *)vdata + offset;
+	const s8 *srcdata = (const s8 *)vdata + dec->posoff;
+	const s8 *data = srcdata;
 
 	const float vpZScale = gstate.getViewportZScale();
 
 	float minProjZ = FLT_MAX;
 	float maxProjZ = -FLT_MAX;
 
-	for (int i = 0; i < vertexCount; i++, data += stride) {
+	for (int i = 0; i < vertexCount; i++) {
+		switch (idxFmt) {
+		case GE_VTYPE_IDX_8BIT:
+		{
+			u8 idx = ((u8 *)idata)[i];
+			data = (const s8 *)srcdata + idx * stride;
+			break;
+		}
+		case GE_VTYPE_IDX_16BIT:
+		{
+			u16 idx = ((u16 *)idata)[i];
+			data = (const s8 *)srcdata + idx * stride;
+			break;
+		}
+		case GE_VTYPE_IDX_32BIT:
+		{
+			u32 idx = ((u32 *)idata)[i];
+			data = (const s8 *)srcdata + idx * stride;
+			break;
+		}
+		default:
+			// We just increment data at the end of the loop.
+			break;
+		}
+
 		Vec4F32 objPos;
 		switch (posFmt) {
 		case GE_VTYPE_POS_8BIT:
@@ -370,13 +406,17 @@ static bool TestBoundingBoxFast(const float *worldViewProj, const void *vdata, i
 			objPos = Vec4F32::Load((const float *)data);
 			break;
 		}
-		Vec4F32 clipPos = objPos.AsVec3ByMatrix44(worldViewProjMat) & vertexMask;  // Not sure we should do the vertex mask thing.
+		Vec4F32 clipPos = objPos.AsVec3ByMatrix44(cullMat);
 		Vec4F32 posW = clipPos.ShuffleWWWW();
 		Vec4F32 posXY = clipPos.ShuffleXXYY();
 		Vec4F32 planeDistXY = posXY * planesXY + posW;
 		insideMaskXY |= planeDistXY.CompareGe(Vec4F32::Zero());
 		Vec4F32 posZ = clipPos.ShuffleZZZZ();  // This means that we compute the Z sides twice. Oh well.
-		Vec4F32 planeDistZ = posZ * planesXY + posW;
+		// We need to add the same culling epsilons as when setting up the cull distances in the vertex shader,
+		// so we don't over-cull here. We could also cull looser, but I can't figure out how to do so accurately.
+		// It's a bit unnecessary to take four reciprocals here, let's see if we can avoid that later.
+		Vec4F32 deltaZ = posW.RecipApprox() * 0.0000304f;
+		Vec4F32 planeDistZ = posZ * planesXY + posW + deltaZ;
 		anyOutsideMaskZ |= planeDistZ.CompareLt(Vec4F32::Zero());
 		insideMaskZ |= planeDistZ.CompareGe(Vec4F32::Zero());
 		const float projZ = vpZScale * clipPos[2] / clipPos[3];
@@ -385,6 +425,10 @@ static bool TestBoundingBoxFast(const float *worldViewProj, const void *vdata, i
 		}
 		if (projZ > maxProjZ) {  // else ruins the minss/maxss optimization.
 			maxProjZ = projZ;
+		}
+
+		if (idxFmt == GE_VTYPE_IDX_NONE) {
+			data += stride;
 		}
 	}
 
@@ -416,11 +460,16 @@ static bool TestBoundingBoxFast(const float *worldViewProj, const void *vdata, i
 		}
 	}
 
-	if (AnyCompareBitsSet(anyOutsideMaskZ)) {
+	if (AnyCompareBitsSet(anyOutsideMaskZ) && (!gstate_c.viewportNearPlaneMatchesOutput || PSP_CoreParameter().compat.flags().CorrectCullAfterClip)) {
 		// Some vertices were outside the Z clipping planes. Clip againt Z=-W in software (and do culling, too).
 		// TODO: With a compat flag for Flatout/Sengoku, we'll be able to avoid this in many cases, unless
 		// GPU_USE_CULL_DISTANCE is missing, in which case we need it for culling.
 		flags |= ClipInfoFlags::SoftClipCull;
+	}
+
+	if (minProjZ == maxProjZ) {
+		// Probably a 2D draw. Send it through software transform!
+		flags |= ClipInfoFlags::FlatZ | ClipInfoFlags::SoftClipCull;
 	}
 
 	if (needFragmentDepthClamp() && (minProjZ < 0 || maxProjZ > 65535)) {
@@ -435,7 +484,7 @@ static bool TestBoundingBoxFast(const float *worldViewProj, const void *vdata, i
 	return true;
 }
 
-bool DrawEngineCommon::TestBoundingBoxFast(const float *cullMatrix, const void *vdata, int vertexCount, const VertexDecoder *dec, u32 vertType, ClipInfoFlags *flags) {
+bool DrawEngineCommon::TestBoundingBoxFast(const float *cullMatrix, const void *vdata, const void *idata, int vertexCount, const VertexDecoder *dec, u32 vertType, ClipInfoFlags *flags) {
 	// Although this may lead to drawing that shouldn't happen, the viewport is more complex on VR.
 	// Let's always say objects are within bounds.
 	if (gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
@@ -444,32 +493,57 @@ bool DrawEngineCommon::TestBoundingBoxFast(const float *cullMatrix, const void *
 		return false;
 	}
 
-	switch (vertType & GE_VTYPE_POS_MASK) {
-	case GE_VTYPE_POS_8BIT:
-		return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT>(cullMatrix, vdata, vertexCount, dec, decoded_, flags);
-	case GE_VTYPE_POS_16BIT:
-		return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT>(cullMatrix, vdata, vertexCount, dec, decoded_, flags);
-	case GE_VTYPE_POS_FLOAT:
-		return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT>(cullMatrix, vdata, vertexCount, dec, decoded_, flags);
+	// Dispatching like this is a bit ugly, but we want to avoid every possible overhead *inside* TestBoundingBoxFast.
+	// That said, I'm not 100% sure it's worth it..
+	switch (vertType & GE_VTYPE_IDX_MASK) {
+	case GE_VTYPE_IDX_NONE:
+		switch (vertType & GE_VTYPE_POS_MASK) {
+		case GE_VTYPE_POS_8BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT, GE_VTYPE_IDX_NONE>(cullMatrix, vdata, nullptr, vertexCount, dec, flags);
+		case GE_VTYPE_POS_16BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT, GE_VTYPE_IDX_NONE>(cullMatrix, vdata, nullptr, vertexCount, dec, flags);
+		case GE_VTYPE_POS_FLOAT: return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT, GE_VTYPE_IDX_NONE>(cullMatrix, vdata, nullptr, vertexCount, dec, flags);
+		default:
+			break;
+		}
+		break;
+	case GE_VTYPE_IDX_8BIT:
+		switch (vertType & GE_VTYPE_POS_MASK) {
+		case GE_VTYPE_POS_8BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT, GE_VTYPE_IDX_8BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
+		case GE_VTYPE_POS_16BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT, GE_VTYPE_IDX_8BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
+		case GE_VTYPE_POS_FLOAT: return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT, GE_VTYPE_IDX_8BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
+		default:
+			break;
+		}
+		break;
+	case GE_VTYPE_IDX_16BIT:
+		switch (vertType & GE_VTYPE_POS_MASK) {
+		case GE_VTYPE_POS_8BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT, GE_VTYPE_IDX_16BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
+		case GE_VTYPE_POS_16BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT, GE_VTYPE_IDX_16BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
+		case GE_VTYPE_POS_FLOAT: return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT, GE_VTYPE_IDX_16BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
+		default:
+			break;
+		}
+		break;
+	case GE_VTYPE_IDX_32BIT:
+		switch (vertType & GE_VTYPE_POS_MASK) {
+		case GE_VTYPE_POS_8BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT, GE_VTYPE_IDX_32BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
+		case GE_VTYPE_POS_16BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT, GE_VTYPE_IDX_32BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
+		case GE_VTYPE_POS_FLOAT: return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT, GE_VTYPE_IDX_32BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
+		default:
+			break;
+		}
+		break;
 	default:
-		// Shouldn't end up here with the checks outside this function.
-		_dbg_assert_(false);
-		return true;
+		break;
 	}
+	_dbg_assert_(false);
+	return true;
 }
 
 // 2D bounding box test against scissor. No indexing yet.
 // Only supports non-indexed draws with float positions. TODO: Add more float formats.
-bool DrawEngineCommon::TestBoundingBoxThrough(const void *vdata, int vertexCount, const VertexDecoder *dec, u32 vertType, int *bytesRead) {
-	// Grab temp buffer space from large offsets in decoded_. Not exactly safe for large draws.
-	if (vertexCount > 16) {
-		return true;
-	}
-
-	// Although this may lead to drawing that shouldn't happen, the viewport is more complex on VR.
-	// Let's always say objects are within bounds.
-	if (gstate_c.Use(GPU_USE_VIRTUAL_REALITY))
-		return true;
+bool DrawEngineCommon::TestBoundingBoxThrough(GEPrimitiveType prim, const void *vdata, const void *idata, int vertexCount, const VertexDecoder *dec, u32 vertType, int *bytesRead, ClipInfoFlags *flags) {
+	// For through mode, we only check FlatZ.
+	*flags |= ClipInfoFlags::Valid;
 
 	const int stride = dec->VertexSize();
 	const int posOffset = dec->posoff;
@@ -485,37 +559,83 @@ bool DrawEngineCommon::TestBoundingBoxThrough(const void *vdata, int vertexCount
 	const float right = gstate.getScissorX2() + 1;
 	const float bottom = gstate.getScissorY2() + 1;
 
-	switch (vertType & GE_VTYPE_POS_MASK) {
-	case GE_VTYPE_POS_FLOAT:
-	{
-		// TODO: This can be SIMD'd, with some trickery.
-		for (int i = 0; i < vertexCount; i++) {
-			const float *pos = (const float*)((const u8 *)vdata + stride * i + posOffset);
-			const float x = pos[0];
-			const float y = pos[1];
-			if (x >= left) {
-				allOutsideLeft = false;
-			}
-			if (x <= right) {
-				allOutsideRight = false;
-			}
-			if (y >= top) {
-				allOutsideTop = false;
-			}
-			if (y <= bottom) {
-				allOutsideBottom = false;
-			}
+	float minZ = FLT_MAX;
+	float maxZ = -FLT_MAX;
+
+	IndexConverter conv(vertType, idata);
+	// TODO: This can be SIMD'd, with some trickery.
+	for (int i = 0; i < vertexCount; i++) {
+		int index = conv(i);
+
+		float x, y, z;
+		switch (vertType & GE_VTYPE_POS_MASK) {
+		case GE_VTYPE_POS_FLOAT:
+		{
+			const float *pos = (const float*)((const u8 *)vdata + stride * index + posOffset);
+			x = pos[0];
+			y = pos[1];
+			z = pos[2];
 		}
-		if (allOutsideLeft || allOutsideTop || allOutsideRight || allOutsideBottom) {
+		break;
+		case GE_VTYPE_POS_8BIT:
+		{
+			// Through mode doesn't really support 8-bit though.
+			const u8 *pos8 = (const u8 *)vdata + stride * index + posOffset;
+			x = pos8[0];
+			y = pos8[1];
+			z = pos8[2];
+			break;
+		}
+		case GE_VTYPE_POS_16BIT:
+		{
+			const s16 *pos16 = (const s16 *)((const u8 *)vdata + stride * index + posOffset);
+			x = pos16[0];
+			y = pos16[1];
+			z = (u16)pos16[2];
+			break;
+		}
+		default:
 			return false;
 		}
+		if (x >= left) {
+			allOutsideLeft = false;
+		}
+		if (x <= right) {
+			allOutsideRight = false;
+		}
+		if (y >= top) {
+			allOutsideTop = false;
+		}
+		if (y <= bottom) {
+			allOutsideBottom = false;
+		}
+
+		// If prim is rectangles, we only update minZ and maxZ for every second vertex,
+		// since the Z for the whole rect is taken from the 2nd.
+		if (prim != GE_PRIM_RECTANGLES || (i & 1) == 1) {
+			if (z < minZ) {
+				minZ = z;
+			}
+			if (z > maxZ) {
+				maxZ = z;
+			}
+		}
+	}
+
+	// Although this may lead to drawing that shouldn't happen, the viewport is more complex on VR.
+	// Let's always say objects are within bounds.
+	if (gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
 		return true;
 	}
-	default:
-		// Shouldn't end up here with the checks outside this function.
-		_dbg_assert_(false);
-		return true;
+
+	if (allOutsideLeft || allOutsideTop || allOutsideRight || allOutsideBottom) {
+		return false;
 	}
+
+	if (minZ == maxZ) {
+		*flags |= ClipInfoFlags::FlatZ;
+	}
+	return true;
 }
 
 bool DrawEngineCommon::EstimateThroughPrimSafeSize(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, u32 vertType, int *safeWidth, int *safeHeight) {
@@ -771,7 +891,7 @@ bool DrawEngineCommon::SubmitPrim(const void *verts, const void *inds, GEPrimiti
 		numDrawVerts_ = numDrawVerts + 1;  // Increment the uncached variable
 		dv.verts = verts;
 		dv.vertexCount = vertexCount;
-		dv.uvScale = gstate_c.uv;
+		dv.uvScale = LoadUVScaleOffset(gstate);
 		// Does handle the unindexed case.
 		GetIndexBounds(inds, vertexCount, vertTypeID, &dv.indexLowerBound, &dv.indexUpperBound);
 	}
@@ -785,10 +905,6 @@ bool DrawEngineCommon::SubmitPrim(const void *verts, const void *inds, GEPrimiti
 		Flush();
 	}
 	return true;
-}
-
-void DrawEngineCommon::BeginFrame() {
-	applySkinInDecode_ = g_Config.bSoftwareSkinning;
 }
 
 void DrawEngineCommon::DecodeVerts(const VertexDecoder *dec, u8 *dest) {
@@ -858,35 +974,6 @@ bool DrawEngineCommon::CanUseHardwareTransform(int prim) const {
 	return !gstate.isModeThrough() && prim != GE_PRIM_RECTANGLES && prim > GE_PRIM_LINE_STRIP;
 }
 
-bool DrawEngineCommon::CanUseHardwareTessellation(GEPatchPrimType prim) const {
-	if (useHWTessellation_) {
-		return CanUseHardwareTransform(PatchPrimToPrim(prim));
-	}
-	return false;
-}
-
-void TessellationDataTransfer::CopyControlPoints(float *pos, float *tex, float *col, int posStride, int texStride, int colStride, const SimpleVertex *const *points, int size, u32 vertType) {
-	bool hasColor = (vertType & GE_VTYPE_COL_MASK) != 0;
-	bool hasTexCoord = (vertType & GE_VTYPE_TC_MASK) != 0;
-
-	for (int i = 0; i < size; ++i) {
-		memcpy(pos, points[i]->pos.AsArray(), 3 * sizeof(float));
-		pos += posStride;
-	}
-	if (hasTexCoord) {
-		for (int i = 0; i < size; ++i) {
-			memcpy(tex, points[i]->uv, 2 * sizeof(float));
-			tex += texStride;
-		}
-	}
-	if (hasColor) {
-		for (int i = 0; i < size; ++i) {
-			memcpy(col, Vec4f::FromRGBA(points[i]->color_32).AsArray(), 4 * sizeof(float));
-			col += colStride;
-		}
-	}
-}
-
 bool DrawEngineCommon::DescribeCodePtr(const u8 *ptr, std::string &name) const {
 	if (!decJitCache_ || !decJitCache_->IsInSpace(ptr)) {
 		return false;
@@ -907,7 +994,7 @@ bool DrawEngineCommon::DescribeCodePtr(const u8 *ptr, std::string &name) const {
 
 	if (found) {
 		char temp[256];
-		found->ToString(temp, false);
+		found->ToString(temp, sizeof(temp), false);
 		name = temp;
 		snprintf(temp, sizeof(temp), "_%08X", foundKey);
 		name += temp;
@@ -973,6 +1060,7 @@ Mat4F32 ComputeFinalProjMatrix() {
 		0.0f,
 	};
 
+	// TODO: Simply use Mat4F32 m(gstate_c.worldviewproj);
 	Mat4F32 wv = Mul4x3By4x4(Mat4x3F32(gstate.worldMatrix), Mat4F32::Load4x3(gstate.viewMatrix));
 	Mat4F32 m = Mul4x4By4x4(wv, Mat4F32(gstate.projMatrix));
 	// NOTE: Applying the translation actually works pre-divide, since W is also affected.

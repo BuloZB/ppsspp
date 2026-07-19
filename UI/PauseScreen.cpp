@@ -55,6 +55,7 @@
 #include "GPU/GPUCommon.h"
 #include "GPU/GPUState.h"
 
+#include "UI/DevScreens.h"
 #include "UI/EmuScreen.h"
 #include "UI/PauseScreen.h"
 #include "UI/LoadStateConfirmScreen.h"
@@ -332,11 +333,20 @@ void SaveSlotView::OnSaveState(UI::EventParams &e) {
 
 void GamePauseScreen::update() {
 	UpdateUIState(UISTATE_PAUSEMENU);
-	UIScreen::update();
 
-	if (finishNextFrame_) {
-		TriggerFinish(finishNextFrameResult_);
-		finishNextFrame_ = false;
+	if (!firstFrame_ && g_controlMapper.PollPauseTrigger()) {
+		TriggerFinish(DR_BACK);
+	}
+	UIBaseDialogScreen::update();
+
+	firstFrame_ = false;
+
+	{
+		std::lock_guard<std::mutex> lock(finishNextFrameMutex_);
+		if (finishNextFrame_) {
+			TriggerFinish(finishNextFrameResult_);
+			finishNextFrame_ = false;
+		}
 	}
 
 	const bool networkConnected = IsNetworkConnected();
@@ -375,20 +385,10 @@ GamePauseScreen::~GamePauseScreen() {
 	__DisplaySetWasPaused();
 }
 
-bool GamePauseScreen::UnsyncKey(const KeyInput &key) {
-	int retval = UIScreen::UnsyncKey(key);
-	bool pauseTrigger = false;
-	return retval || g_controlMapper.Key(key, &pauseTrigger);
-}
-
-void GamePauseScreen::UnsyncAxis(const AxisInput *axes, size_t count) {
-	UIScreen::UnsyncAxis(axes, count);
-	g_controlMapper.Axis(axes, count);
-}
-
 void GamePauseScreen::OnVKey(VirtKey virtualKeyCode, bool down) {
 	// Simple de-bounce using createdTime_, just to be safe.
 	if (down && virtualKeyCode == VIRTKEY_PAUSE && time_now_d() > createdTime_ + 0.1) {
+		std::lock_guard<std::mutex> lock(finishNextFrameMutex_);
 		finishNextFrame_ = true;
 		finishNextFrameResult_ = DR_BACK;
 	}
@@ -409,6 +409,7 @@ void GamePauseScreen::CreateSavestateControls(UI::LinearLayout *leftColumnItems,
 			int slotNum = v->GetSlot();
 			auto doLoad = [this, slotNum]() {
 				SaveState::LoadSlot(saveStatePrefix_, slotNum, &ShowMessageAfterSaveStateAction);
+				std::lock_guard<std::mutex> lock(finishNextFrameMutex_);
 				finishNextFrame_ = true;
 				finishNextFrameResult_ = DR_CANCEL;
 			};
@@ -755,7 +756,7 @@ void GamePauseScreen::CreateViews() {
 			screenManager()->push(new GameScreen(gamePath_, true));
 		});
 
-		if (System_GetPropertyInt(SYSPROP_DEVICE_TYPE) == DEVICE_TYPE_MOBILE) {
+		if (System_GetPropertyBool(SYSPROP_CAN_RESTRICT_ORIENTATION)) {
 			AddRotationPicker(screenManager(), middleColumn, false);
 		}
 
@@ -781,17 +782,22 @@ void GamePauseScreen::ShowContextMenu(UI::View *menuButton, bool portrait) {
 				screenManager()->push(new UI::MessagePopupScreen(di->T("Reset"), confirmMessage, di->T("Reset"), di->T("Cancel"), [this](bool result) {
 					if (result) {
 						System_PostUIMessage(UIMessage::REQUEST_GAME_RESET);
-						finishNextFrameResult_ = DR_BACK;  // resume
+						std::lock_guard<std::mutex> lock(finishNextFrameMutex_);
 						finishNextFrame_ = true;
+						finishNextFrameResult_ = DR_BACK;  // resume
 					}
 				}));
 			} else {
 				System_PostUIMessage(UIMessage::REQUEST_GAME_RESET);
+				std::lock_guard<std::mutex> lock(finishNextFrameMutex_);
 				finishNextFrameResult_ = DR_BACK;  // resume
 				finishNextFrame_ = true;
 			}
 		});
-
+		auto dev = GetI18NCategory(I18NCat::DEVELOPER);
+		parent->Add(new Choice(dev->T("DevMenu"), ImageID("I_DEBUGGER")))->OnClick.Add([this](UI::EventParams &e) {
+			screenManager()->push(new DevMenuScreen(gamePath_, I18NCat::DEVELOPER));
+		});
 		if (portrait) {
 			AddExtraOptions(parent);
 		}
@@ -820,6 +826,7 @@ void GamePauseScreen::dialogFinished(const Screen *dialog, DialogResult dr) {
 	std::string tag = dialog->tag();
 	if (tag == "ScreenshotView") {
 		if (dr == DR_OK) {
+			std::lock_guard<std::mutex> lock(finishNextFrameMutex_);
 			finishNextFrame_ = true;
 		} else if (dr != DR_CANCEL && dr != DR_BACK) {
 			// Just go back to the pause menu, but refresh the savestate thumbnails in case something changed.
@@ -895,6 +902,7 @@ void GamePauseScreen::OnExit(UI::EventParams &e) {
 				if (g_Config.bPauseMenuExitsEmulator) {
 					System_ExitApp();
 				} else {
+					std::lock_guard<std::mutex> lock(finishNextFrameMutex_);
 					finishNextFrameResult_ = DR_OK;  // exit game
 					finishNextFrame_ = true;
 				}

@@ -621,7 +621,7 @@ bool GEExpressionFunctions::parseSymbol(char *str, uint32_t &symbolValue) {
 }
 
 uint32_t GEExpressionFunctions::getReferenceValue(uint32_t referenceIndex) {
-	GPUgstate state = gpu_->GetGState();
+	GEState state = gpu_->GetGState();
 	if (referenceIndex < 0x100) {
 		GECmdFormat fmt = GECmdInfoByCmd(GECommand(referenceIndex)).cmdFmt;
 		uint32_t value = state.cmdmem[referenceIndex];
@@ -1011,8 +1011,6 @@ u32 GPUDebugBuffer::PixelSize() const {
 	case GPU_DBG_FORMAT_FLOAT:
 	case GPU_DBG_FORMAT_24BIT_8X:
 	case GPU_DBG_FORMAT_24X_8BIT:
-	case GPU_DBG_FORMAT_FLOAT_DIV_256:
-	case GPU_DBG_FORMAT_24BIT_8X_DIV_256:
 		return 4;
 
 	case GPU_DBG_FORMAT_888_RGB:

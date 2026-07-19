@@ -210,10 +210,13 @@ const UniformDef g_uniforms[] = {
 	{ "vec2", "TintSaturation", 1 },
 };
 
-static ShaderModule *GenerateVShader(DrawContext *draw, bool texCoords, bool tint) {
+static ShaderModule *GenerateVShader(DrawContext *draw, VertexShaderPreset preset, bool tintSupported) {
 	const ShaderLanguageDesc &shaderLanguageDesc = draw->GetShaderLanguageDesc();
 	char code[2048];
 	ShaderWriter vsWriter(code, shaderLanguageDesc, ShaderStage::Vertex);
+
+	const bool texCoords = preset != VS_COLOR_2D;
+	const bool tint = tintSupported && (preset == VS_TEXTURE_COLOR_2D || preset == VS_COLOR_2D);
 
 	if (tint) {
 		vsWriter.C(R"(
@@ -252,12 +255,20 @@ vec3 hsv2rgb(vec3 c) {
 	return draw->CreateShaderModule(ShaderStage::Vertex, shaderLanguageDesc.shaderLanguage, (const uint8_t *)code, strlen(code));
 }
 
-static ShaderModule *GenerateFShader(DrawContext *draw, bool texturing, bool rbSwizzle) {
+static ShaderModule *GenerateFShader(DrawContext *draw, FragmentShaderPreset preset) {
 	const ShaderLanguageDesc &shaderLanguageDesc = draw->GetShaderLanguageDesc();
 	char code[2048];
 	ShaderWriter fsWriter(code, shaderLanguageDesc, ShaderStage::Fragment);
+
+	const bool texturing = preset != FS_COLOR_2D;
+	const bool rbSwizzle = preset == FS_TEXTURE_COLOR_2D_RB_SWIZZLE;
+
 	fsWriter.DeclareSamplers(g_samplers);
-	fsWriter.BeginFSMain(g_uniforms, texturing ? Slice(g_varyingsTex) : Slice(g_varyings));
+
+	// NOTE (first argument): We do not declare the uniforms here, as they aren't used in any of the preset shaders.
+	// Declaring them currently causes a precision clash with some GLSL compilers, see issue #21904.
+	// So if we need them in the future, that needs to be dealt with.
+	fsWriter.BeginFSMain(Slice<UniformDef>::empty(), texturing ? Slice(g_varyingsTex) : Slice(g_varyings));
 	if (texturing) {
 		fsWriter.C("vec4 col = ");
 		fsWriter.SampleTexture2D("tex", "oTexCoord0");
@@ -265,6 +276,9 @@ static ShaderModule *GenerateFShader(DrawContext *draw, bool texturing, bool rbS
 			fsWriter.C(".zyxw * oColor0;\n");
 		} else {
 			fsWriter.C(" * oColor0;\n");
+		}
+		if (preset == FS_TEXTURE_COLOR_2D_ALPHA_TO_GRAY) {
+			fsWriter.C("col.rgb = splat3(col.a);\n");
 		}
 	} else {
 		fsWriter.C("vec4 col = oColor0;\n");
@@ -275,19 +289,23 @@ static ShaderModule *GenerateFShader(DrawContext *draw, bool texturing, bool rbS
 }
 
 bool DrawContext::CreatePresets() {
-	bool tintSupported = true;
-	if (bugs_.Has(Bugs::RASPBERRY_SHADER_COMP_HANG)) {
-		tintSupported = false;
+	bool tintSupported = !bugs_.Has(Bugs::RASPBERRY_SHADER_COMP_HANG);
+
+	for (int i = 0; i < VS_MAX_PRESET; i++) {
+		vsPresets_[i] = GenerateVShader(this, (VertexShaderPreset)i, tintSupported);
+		if (!vsPresets_[i]) {
+			WARN_LOG(Log::G3D, "Failed to create vertex shader preset %d", i);
+			return false;
+		}
 	}
-
-	vsPresets_[VS_TEXTURE_COLOR_2D] = GenerateVShader(this, true, tintSupported);
-	vsPresets_[VS_COLOR_2D] = GenerateVShader(this, false, tintSupported);
-
-	fsPresets_[FS_TEXTURE_COLOR_2D] = GenerateFShader(this, true, false);
-	fsPresets_[FS_COLOR_2D] = GenerateFShader(this, false, false);
-	fsPresets_[FS_TEXTURE_COLOR_2D_RB_SWIZZLE] = GenerateFShader(this, true, true);
-
-	return vsPresets_[VS_TEXTURE_COLOR_2D] && vsPresets_[VS_COLOR_2D] && fsPresets_[FS_TEXTURE_COLOR_2D] && fsPresets_[FS_COLOR_2D] && fsPresets_[FS_TEXTURE_COLOR_2D_RB_SWIZZLE];
+	for (int i = 0; i < FS_MAX_PRESET; i++) {
+		fsPresets_[i] = GenerateFShader(this, (FragmentShaderPreset)i);
+		if (!fsPresets_[i]) {
+			WARN_LOG(Log::G3D, "Failed to create fragment shader preset %d", i);
+			return false;
+		}
+	}
+	return true;
 }
 
 void DrawContext::DestroyPresets() {
@@ -516,7 +534,6 @@ const char *Bugs::GetBugName(uint32_t bug) {
 	case RASPBERRY_SHADER_COMP_HANG: return "RASPBERRY_SHADER_COMP_HANG";
 	case MALI_CONSTANT_LOAD_BUG: return "MALI_CONSTANT_LOAD_BUG";
 	case SUBPASS_FEEDBACK_BROKEN: return "SUBPASS_FEEDBACK_BROKEN";
-	case GEOMETRY_SHADERS_SLOW_OR_BROKEN: return "GEOMETRY_SHADERS_SLOW_OR_BROKEN";
 	case ADRENO_RESOURCE_DEADLOCK: return "ADRENO_RESOURCE_DEADLOCK";
 	case PVR_BAD_16BIT_TEXFORMATS: return "PVR_BAD_16BIT_TEXFORMATS";
 	case EMPTY_RENDERPASS_BROKEN_MALI: return "EMPTY_RENDERPASS_BROKEN_MALI";

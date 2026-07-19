@@ -7,6 +7,7 @@
 #include "Common/GraphicsContext.h"
 #include "Common/LogReporting.h"
 #include "Common/Math/SIMDHeaders.h"
+#include "Common/Math/CrossSIMD.h"
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
 #include "Common/Serialize/SerializeList.h"
@@ -264,6 +265,7 @@ int GPUCommon::ListSync(int listid, int mode) {
 	if (dl.waitUntilTicks > CoreTiming::GetTicks()) {
 		__GeWaitCurrentThread(GPU_SYNC_LIST, listid, "GeListSync");
 	}
+
 	return PSP_GE_LIST_COMPLETED;
 }
 
@@ -343,7 +345,7 @@ void GPUCommon::ResetMatrices() {
 		matrixVisible.tgen[i] = toFloat24(gstate.tgenMatrix[i]);
 
 	// Assume all the matrices changed, so dirty things related to them.
-	gstate_c.Dirty(DIRTY_WORLDMATRIX | DIRTY_VIEWMATRIX | DIRTY_PROJMATRIX | DIRTY_TEXMATRIX | DIRTY_FRAGMENTSHADER_STATE | DIRTY_BONE_UNIFORMS);
+	gstate_c.Dirty(DIRTY_WORLDMATRIX | DIRTY_VIEWMATRIX | DIRTY_PROJMATRIX | DIRTY_TEXMATRIX | DIRTY_FRAGMENTSHADER_STATE);
 }
 
 u32 GPUCommon::EnqueueList(u32 listpc, u32 stall, int subIntrBase, PSPPointer<PspGeListArgs> args, bool head, bool *runList) {
@@ -368,6 +370,7 @@ u32 GPUCommon::EnqueueList(u32 listpc, u32 stall, int subIntrBase, PSPPointer<Ps
 	u64 currentTicks = CoreTiming::GetTicks();
 	u32 stackAddr = args.IsValid() && args->size >= 16 ? (u32)args->stackAddr : 0;
 	// Check compatibility
+	// TODO: Figure out what games are affected by this...
 	if (sceKernelGetCompiledSdkVersion() > 0x01FFFFFF) {
 		//numStacks = 0;
 		//stack = NULL;
@@ -462,6 +465,9 @@ u32 GPUCommon::EnqueueList(u32 listpc, u32 stall, int subIntrBase, PSPPointer<Ps
 		// LATER: Wait, what? Please explain.
 		*runList = true;
 	}
+
+	gpuStats.perFrame.numEnqueue++;
+
 	return id;
 }
 
@@ -496,6 +502,8 @@ u32 GPUCommon::UpdateStall(int listid, u32 newstall, bool *runList) {
 		return SCE_KERNEL_ERROR_ALREADY;
 
 	dl.stall = newstall & 0x0FFFFFFF;
+
+	gpuStats.perFrame.numUpdateStall++;
 
 	*runList = true;
 	return 0;
@@ -1232,9 +1240,10 @@ void GPUCommon::Execute_BoundingBox(u32 op, u32 diff) {
 		int checkSize = count - 0x100;
 		currentList->bboxResult = drawEngineCommon_->TestBoundingBox(control_points, inds, checkSize, dec, vertType);
 	} else {
+		// This is the normal case that pretty much always happens, the others are esoteric.
 		currentList->bboxResult = drawEngineCommon_->TestBoundingBox(control_points, inds, count, dec, vertType);
 	}
-	AdvanceVerts(gstate.vertType, count, bytesRead);
+	gstate_c.AdvanceVerts(vertType, count, bytesRead);
 }
 
 void GPUCommon::Execute_MorphWeight(u32 op, u32 diff) {
@@ -1316,8 +1325,6 @@ void GPUCommon::FlushImm() {
 
 	SetDrawType(DRAW_PRIM, immPrim_);
 
-	gstate_c.UpdateUVScaleOffset();
-
 	VirtualFramebuffer *vfb = nullptr;
 	if (framebufferManager_) {
 		bool changed;
@@ -1382,19 +1389,7 @@ void GPUCommon::FastLoadBoneMatrix(u32 target) {
 	const u32 num = gstate.boneMatrixNumber & 0x7F;
 	_dbg_assert_msg_(num + 12 <= 96, "FastLoadBoneMatrix would corrupt memory");
 	const u32 mtxNum = num / 12;
-	u32 uniformsToDirty = DIRTY_BONEMATRIX0 << mtxNum;
-	if (num != 12 * mtxNum) {
-		uniformsToDirty |= DIRTY_BONEMATRIX0 << ((mtxNum + 1) & 7);
-	}
 
-	if (!g_Config.bSoftwareSkinning) {
-		if (flushOnParams_) {
-			Flush();
-		}
-		gstate_c.Dirty(uniformsToDirty);
-	} else {
-		gstate_c.deferredVertTypeDirty |= uniformsToDirty;
-	}
 	gstate.FastLoadBoneMatrix(target);
 
 	cyclesExecuted += 2 * 14;  // one to reset the counter, 12 to load the matrix, and a return.
@@ -1577,23 +1572,29 @@ bool GPUCommon::GetCurrentDisplayList(DisplayList &list) const {
 	return true;
 }
 
-int GPUCommon::GetCurrentPrimCount(GEPrimitiveType *prim) const {
+int GPUCommon::GetCurrentPrim(GEPrimitiveType *prim, GECommand *outCmd) const {
 	DisplayList list;
-	u32 cmd;
+	u32 cmdWord;
 	if (GetCurrentDisplayList(list)) {
-		cmd = Memory::Read_U32(list.pc);
+		cmdWord = Memory::Read_U32(list.pc);
 	} else {
 		// Current prim value.
-		cmd = gstate.cmdmem[GE_CMD_PRIM];
+		cmdWord = gstate.cmdmem[GE_CMD_PRIM];
 	}
 
-	if ((cmd >> 24) == GE_CMD_PRIM || (cmd >> 24) == GE_CMD_BOUNDINGBOX) {
-		*prim = GEPrimitiveType((cmd >> 16) & 7);
-		return cmd & 0xFFFF;
-	} else if ((cmd >> 24) == GE_CMD_BEZIER || (cmd >> 24) == GE_CMD_SPLINE) {
+	GECommand cmd = static_cast<GECommand>(cmdWord >> 24);
+	*outCmd = cmd;
+
+	if (cmd == GE_CMD_PRIM) {
+		*prim = GEPrimitiveType((cmdWord >> 16) & 7);
+		return cmdWord & 0xFFFF;
+	} else if (cmd == GE_CMD_BOUNDINGBOX) {
+		*prim = GE_PRIM_POINTS;
+		return cmdWord & 0xFFFF;
+	} else if (cmd == GE_CMD_BEZIER || cmd == GE_CMD_SPLINE) {
 		*prim = GE_PRIM_TRIANGLES;  // no correct answer
-		u32 u = (cmd & 0x00FF) >> 0;
-		u32 v = (cmd & 0xFF00) >> 8;
+		u32 u = (cmdWord & 0x00FF) >> 0;
+		u32 v = (cmdWord & 0xFF00) >> 8;
 		return u * v;
 	} else {
 		// Unknown primitive.
@@ -1692,7 +1693,7 @@ u32 GPUCommon::GetIndexAddress() {
 	return gstate_c.indexAddr;
 }
 
-const GPUgstate &GPUCommon::GetGState() {
+const GEState &GPUCommon::GetGState() {
 	return gstate;
 }
 
@@ -2026,8 +2027,8 @@ bool GPUCommon::PerformWriteStencilFromMemory(u32 dest, int size, WriteStencil f
 	return false;
 }
 
-bool GPUCommon::GetCurrentDrawAsDebugVertices(GEPrimitiveType prim, GEPrimitiveType *outPrim, int count, std::vector<GPUDebugVertex> &vertices, std::vector<u16> &indices, int *lowerIndexBound, TransformStats *stats, DebugVertexFlags flags) const {
-	return ::GetCurrentDrawAsDebugVertices(drawEngineCommon_, prim, outPrim, count, vertices, indices, lowerIndexBound, stats, flags);
+bool GPUCommon::GetCurrentDrawAsDebugVertices(GECommand cmd, GEPrimitiveType prim, GEPrimitiveType *outPrim, int count, std::vector<GPUDebugVertex> *vertices, std::vector<u16> *indices, int *lowerIndexBound, TransformStats *stats, DebugVertexFlags flags) const {
+	return ::GetCurrentDrawAsDebugVertices(drawEngineCommon_, cmd, prim, outPrim, count, vertices, indices, lowerIndexBound, stats, flags);
 }
 
 bool GPUCommon::DescribeCodePtr(const u8 *ptr, std::string &name) {
@@ -2055,6 +2056,7 @@ void GPUCommon::SetBreakNext(GPUDebug::BreakNext next) {
 		break;
 	case GPUDebug::BreakNext::PRIM:
 	case GPUDebug::BreakNext::COUNT:
+		breakpoints_.AddCmdBreakpoint(GE_CMD_BOUNDINGBOX, true);
 		breakpoints_.AddCmdBreakpoint(GE_CMD_PRIM, true);
 		breakpoints_.AddCmdBreakpoint(GE_CMD_BEZIER, true);
 		breakpoints_.AddCmdBreakpoint(GE_CMD_SPLINE, true);
@@ -2104,7 +2106,9 @@ GPUDebug::NotifyResult GPUCommon::NotifyCommand(u32 pc, GPUBreakpoints *breakpoi
 	bool isPrim = false;
 
 	bool process = true;  // Process is only for the restrictPrimRanges functionality
-	if (cmd == GE_CMD_PRIM || cmd == GE_CMD_BEZIER || cmd == GE_CMD_SPLINE || cmd == GE_CMD_VAP || cmd == GE_CMD_TRANSFERSTART) {  // VAP is immediate mode prims.
+
+	// NOTE: We now consider BBOX a PRIM command.
+	if (cmd == GE_CMD_PRIM || cmd == GE_CMD_BEZIER || cmd == GE_CMD_SPLINE || cmd == GE_CMD_VAP || cmd == GE_CMD_TRANSFERSTART || cmd == GE_CMD_BOUNDINGBOX) {  // VAP is immediate mode prims.
 		isPrim = true;
 		primsThisFrame_++;
 
@@ -2197,18 +2201,21 @@ bool GPUCommon::SetRestrictPrims(std::string_view rule) {
 }
 
 void GPUCommon::UpdateMatrixProducts() {
+	// We clean the dirty flags at the end.
+
 	// Compute any dirty product matrices.
 	if (gstate_c.IsDirty(DIRTY_VIEW_PROJ_MATRIX)) {
-		float view[4 * 4];
-		ConvertMatrix4x3To4x4(view, gstate.viewMatrix);
-		Matrix4ByMatrix4(gstate_c.viewproj, view, gstate.projMatrix);
-		gstate_c.Clean(DIRTY_VIEW_PROJ_MATRIX);
+		Mat4x3F32 view(gstate.viewMatrix);
+		Mat4F32 proj(gstate.projMatrix);
+		Mul4x3By4x4(view, proj).Store(gstate_c.viewproj);
 	}
+
 	if (gstate_c.IsDirty(DIRTY_WORLD_VIEW_PROJ_MATRIX)) {
-		float world[4 * 4];
-		ConvertMatrix4x3To4x4(world, gstate.worldMatrix);
-		Matrix4ByMatrix4(gstate_c.worldviewproj, world, gstate_c.viewproj);
+		Mat4x3F32 world(gstate.worldMatrix);
+		Mat4F32 viewproj(gstate_c.viewproj);
+		Mul4x3By4x4(world, viewproj).Store(gstate_c.worldviewproj);
 	}
+
 	if (gstate_c.IsDirty(DIRTY_CULL_MATRIX)) {
 		// Modify the transform matrix to take the viewport into account before culling. This is not necessary
 		// for most games, but there are games that rely on outside-viewport draws (such as Dante's Inferno)'s post

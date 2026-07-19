@@ -59,29 +59,12 @@ enum FBOTexState {
 struct SimpleVertex;
 namespace Spline { struct Weight2D; }
 
-class TessellationDataTransfer {
-public:
-	virtual ~TessellationDataTransfer() {}
-	static void CopyControlPoints(float *pos, float *tex, float *col, int posStride, int texStride, int colStride, const SimpleVertex *const *points, int size, u32 vertType);
-	virtual void SendDataToShader(const SimpleVertex *const *points, int size_u, int size_v, u32 vertType, const Spline::Weight2D &weights) = 0;
-};
-
 // Culling plane, group of 8.
 struct alignas(16) Plane8 {
 	float x[8], y[8], z[8], w[8];
 	void Set(int i, float _x, float _y, float _z, float _w) { x[i] = _x; y[i] = _y; z[i] = _z; w[i] = _w; }
 	float Test(int i, const float f[3]) const { return x[i] * f[0] + y[i] * f[1] + z[i] * f[2] + w[i]; }
 };
-
-enum class ClipInfoFlags {
-	Valid = 1,
-	SoftClipCull = 2,
-	DepthClamp = 8,
-	DepthClampFragment = 16,
-	MinMaxZClip = 32,
-	MinMaxZDiscard = 64,
-};
-ENUM_CLASS_BITOPS(ClipInfoFlags);
 
 class DrawEngineCommon {
 public:
@@ -90,7 +73,7 @@ public:
 
 	void Init();
 
-	virtual void BeginFrame();
+	virtual void BeginFrame() {}
 
 	void SetGPUCommon(GPUCommon *gpuCommon) {
 		gpuCommon_ = gpuCommon;
@@ -116,8 +99,8 @@ public:
 
 	// This is a less accurate version of TestBoundingBox, but faster. Can have more false positives.
 	// Doesn't support indexing.
-	bool TestBoundingBoxFast(const float *cullMatrix, const void *vdata, int vertexCount, const VertexDecoder *dec, u32 vertType, ClipInfoFlags *clipInfoFlags);
-	bool TestBoundingBoxThrough(const void *vdata, int vertexCount, const VertexDecoder *dec, u32 vertType, int *bytesRead);
+	bool TestBoundingBoxFast(const float *cullMatrix, const void *vdata, const void *idata, int vertexCount, const VertexDecoder *dec, u32 vertType, ClipInfoFlags *clipInfoFlags);
+	bool TestBoundingBoxThrough(GEPrimitiveType prim, const void *vdata, const void *idata, int vertexCount, const VertexDecoder *dec, u32 vertType, int *bytesRead, ClipInfoFlags *flags);
 	bool EstimateThroughPrimSafeSize(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, u32 vertType, int *safeWidth, int *safeHeight);
 
 	void FlushPartialDecode() {
@@ -139,7 +122,6 @@ public:
 	static void ClearSplineBezierWeights();
 
 	bool CanUseHardwareTransform(int prim) const;
-	bool CanUseHardwareTessellation(GEPatchPrimType prim) const;
 
 	std::vector<std::string> DebugGetVertexLoaderIDs();
 	std::string DebugGetVertexLoaderString(std::string_view id, DebugShaderStringType stringType);
@@ -174,8 +156,6 @@ public:
 	void FlushQueuedDepth();
 
 protected:
-	virtual bool UpdateUseHWTessellation(bool enabled) const { return enabled; }
-
 	bool CheckClipFlags(bool useHwTransform) const;
 
 	void DecodeVerts(const VertexDecoder *dec, u8 *dest);
@@ -283,7 +263,6 @@ protected:
 	}
 
 	bool useHWTransform_ = false;
-	bool useHWTessellation_ = false;
 	// Used to prevent unnecessary flushing in softgpu.
 	bool flushOnParams_ = true;
 
@@ -303,7 +282,7 @@ protected:
 	TransformedVertex *transformed_ = nullptr;
 	TransformedVertex *transformedExpanded_ = nullptr;
 
-	// Defer all vertex decoding to a "Flush" (except when software skinning)
+	// Defer all vertex decoding to a "Flush" (except when skinning, when we decode per draw)
 	struct DeferredVerts {
 		const void *verts;
 		UVScale uvScale;
@@ -341,8 +320,6 @@ protected:
 	bool anyCCWOrIndexed_ = 0;
 	bool anyIndexed_ = 0;
 
-	bool applySkinInDecode_ = false;
-
 	// Vertex collector state
 	IndexGenerator indexGen;
 	int numDecodedVerts_ = 0;
@@ -355,9 +332,6 @@ protected:
 	uint64_t dirtyRequiresRecheck_ = 0;
 
 	ComputedPipelineState pipelineState_{};
-
-	// Hardware tessellation
-	TessellationDataTransfer *tessDataTransfer = nullptr;
 
 	GPUCommon *gpuCommon_ = nullptr;
 

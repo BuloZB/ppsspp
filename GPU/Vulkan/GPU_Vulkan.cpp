@@ -208,16 +208,6 @@ u32 GPU_Vulkan::CheckGPUFeatures() const {
 		features |= GPU_USE_PRE_ROTATION;
 	}
 
-	// Might enable this later - in the first round we are mostly looking at depth/stencil/discard.
-	// if (!g_Config.bEnableVendorBugChecks)
-	// 	features |= GPU_USE_ACCURATE_DEPTH;
-
-	// Mandatory features on Vulkan, which may be checked in "centralized" code
-	features |= GPU_USE_TEXTURE_LOD_CONTROL;
-	features |= GPU_USE_INSTANCE_RENDERING;
-	features |= GPU_USE_VERTEX_TEXTURE_FETCH;
-	features |= GPU_USE_TEXTURE_FLOAT;
-
 	if (!draw_->GetBugs().Has(Draw::Bugs::PVR_BAD_16BIT_TEXFORMATS)) {
 		// These are VULKAN_4444_FORMAT and friends.
 		// Note that we are now using the correct set of formats - the only cases where some may be missing
@@ -257,7 +247,6 @@ void GPU_Vulkan::BeginHostFrame(const DisplayLayoutConfig &config) {
 
 	framebufferManager_->BeginFrame(config);
 
-	shaderManagerVulkan_->DirtyLastShader();
 	gstate_c.Dirty(DIRTY_ALL);
 
 	if (gstate_c.useFlagsChanged) {
@@ -437,7 +426,7 @@ std::vector<std::string> GPU_Vulkan::DebugGetShaderIDs(DebugShaderType type) {
 std::string GPU_Vulkan::DebugGetShaderString(std::string id, DebugShaderType type, DebugShaderStringType stringType) {
 	switch (type) {
 	case SHADER_TYPE_PIPELINE:
-		return pipelineManager_->DebugGetObjectString(id, type, stringType, shaderManagerVulkan_);
+		return pipelineManager_->DebugGetObjectString(id, type, stringType);
 	case SHADER_TYPE_SAMPLER:
 		return textureCacheVulkan_->DebugGetSamplerString(id, stringType);
 	default:

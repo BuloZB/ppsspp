@@ -30,7 +30,7 @@ class TextureCacheCommon;
 class DrawEngineCommon;
 class GraphicsContext;
 struct PspGeListArgs;
-struct GPUgstate;
+struct GEState;
 class PointerWrap;
 struct VirtualFramebuffer;
 
@@ -75,8 +75,8 @@ public:
 	virtual bool GetOutputFramebuffer(GPUDebugBuffer &buffer) { return false; }
 
 	bool GetCurrentDisplayList(DisplayList &list) const;
-	bool GetCurrentDrawAsDebugVertices(GEPrimitiveType prim, GEPrimitiveType *outPrim, int count, std::vector<GPUDebugVertex> &vertices, std::vector<u16> &indices, int *lowerIndexBound, TransformStats *stats, DebugVertexFlags flags) const;
-	int GetCurrentPrimCount(GEPrimitiveType *prim) const;
+	bool GetCurrentDrawAsDebugVertices(GECommand cmd, GEPrimitiveType prim, GEPrimitiveType *outPrim, int count, std::vector<GPUDebugVertex> *vertices, std::vector<u16> *indices, int *lowerIndexBound, TransformStats *stats, DebugVertexFlags flags) const;
+	int GetCurrentPrim(GEPrimitiveType *prim, GECommand *outCmd) const;  // Return value has the count.
 
 	// FinishInitOnMainThread runs on the main thread, of course.
 	virtual void FinishInitOnMainThread() {}
@@ -201,6 +201,7 @@ public:
 
 	virtual FramebufferManagerCommon *GetFramebufferManagerCommon() { return nullptr; }
 	virtual TextureCacheCommon *GetTextureCacheCommon() { return nullptr; }
+	const DrawEngineCommon *GetDrawEngineCommon() const { return drawEngineCommon_; }
 
 	virtual std::vector<std::string> DebugGetShaderIDs(DebugShaderType shader) { return std::vector<std::string>(); };
 	virtual std::string DebugGetShaderString(std::string id, DebugShaderType shader, DebugShaderStringType stringType) {
@@ -220,7 +221,7 @@ public:
 	u32 GetRelativeAddress(u32 data);
 	u32 GetVertexAddress();
 	u32 GetIndexAddress();
-	const GPUgstate &GetGState();
+	const GEState &GetGState();
 	void SetCmdValue(u32 op);
 
 	DisplayList* getList(int listid) {
@@ -318,15 +319,6 @@ protected:
 
 	// TODO: Unify this. Vulkan and OpenGL are different due to how they buffer data.
 	virtual void FinishDeferred() {}
-
-	void AdvanceVerts(u32 vertType, int count, int bytesRead) {
-		if ((vertType & GE_VTYPE_IDX_MASK) != GE_VTYPE_IDX_NONE) {
-			const int indexShift = ((vertType & GE_VTYPE_IDX_MASK) >> GE_VTYPE_IDX_SHIFT) - 1;
-			gstate_c.indexAddr += count << indexShift;
-		} else {
-			gstate_c.vertexAddr += bytesRead;
-		}
-	}
 
 	virtual void BuildReportingInfo() = 0;
 

@@ -42,6 +42,7 @@ bool IsStencilTestOutputDisabled() {
 	return true;
 }
 
+// This is used to figure out when we can replace discard with alpha blending.
 bool NeedsTestDiscard() {
 	// We assume this is called only when enabled and not trivially true (may also be for color testing.)
 	if (gstate.isStencilTestEnabled() && (gstate.pmska & 0xFF) != 0xFF)
@@ -74,7 +75,7 @@ bool IsAlphaTestTriviallyTrue() {
 		return true;
 
 	case GE_COMP_GEQUAL:
-		if (gstate_c.vertexFullAlpha && (gstate_c.textureFullAlpha || !gstate.isTextureAlphaUsed()))
+		if (gstate_c.vertexFullAlpha && (gstate_c.textureSolidAlpha || !gstate.isTextureAlphaUsed()))
 			return true;  // If alpha is full, it doesn't matter what the ref value is.
 		return gstate.getAlphaTestRef() == 0;
 
@@ -91,7 +92,7 @@ bool IsAlphaTestTriviallyTrue() {
 	case GE_COMP_GREATER:
 	{
 		// If the texture and vertex only use 1.0 alpha, then the ref value doesn't matter.
-		if (gstate_c.vertexFullAlpha && (gstate_c.textureFullAlpha || !gstate.isTextureAlphaUsed()))
+		if (gstate_c.vertexFullAlpha && (gstate_c.textureSolidAlpha || !gstate.isTextureAlphaUsed()))
 			return true;
 		return gstate.getAlphaTestRef() == 0 && !NeedsTestDiscard();
 	}
@@ -234,9 +235,7 @@ StencilValueType ReplaceAlphaWithStencilType() {
 
 	case GE_FORMAT_4444:
 	case GE_FORMAT_8888:
-	case GE_FORMAT_INVALID:
-	case GE_FORMAT_DEPTH16:
-	case GE_FORMAT_CLUT8:
+	default:
 		switch (gstate.getStencilOpZPass()) {
 		case GE_STENCILOP_REPLACE:
 			// TODO: Could detect zero here and force ZERO - less uniform updates?
@@ -246,10 +245,10 @@ StencilValueType ReplaceAlphaWithStencilType() {
 			return STENCIL_VALUE_ZERO;
 
 		case GE_STENCILOP_DECR:
-			return gstate_c.framebufFormat == GE_FORMAT_4444 ? STENCIL_VALUE_DECR_4 : STENCIL_VALUE_DECR_8;
+			return gstate_c.framebufFormat == GE_FORMAT_4444 ? STENCIL_VALUE_DECR_4BIT : STENCIL_VALUE_DECR_8BIT;
 
 		case GE_STENCILOP_INCR:
-			return gstate_c.framebufFormat == GE_FORMAT_4444 ? STENCIL_VALUE_INCR_4 : STENCIL_VALUE_INCR_8;
+			return gstate_c.framebufFormat == GE_FORMAT_4444 ? STENCIL_VALUE_INCR_4BIT : STENCIL_VALUE_INCR_8BIT;
 
 		case GE_STENCILOP_INVERT:
 			return STENCIL_VALUE_INVERT;
@@ -518,66 +517,65 @@ ReplaceBlendType ReplaceBlendWithShader(GEBufferFormat bufferFormat) {
 	return REPLACE_BLEND_STANDARD;
 }
 
-// The supported flag combinations. TODO: Maybe they should be distilled down into an enum.
-// Currently obsolete. We may reintroduce squeezing 24-bit depth into a 16-bit range, although that
-// will mess with hardware depth clamp, so likely not worth it anymore.
-float DepthSliceFactor(u32 useFlags) {
-	return 1.0f;
-}
-
-// See class DepthScaleFactors for how to apply.
-DepthScaleFactors GetDepthScaleFactors(u32 useFlags) {
-	return DepthScaleFactors(0.0f, 65535.0f);
-}
-
+// Viewport and scissor really could be treated entirely separately, but the non-buffered case is nicer by doing them "together".
 void ConvertViewportAndScissor(const DisplayLayoutConfig &config, bool useBufferedRendering, float renderWidth, float renderHeight, int bufferWidth, int bufferHeight, ViewportAndScissor &out) {
-	float renderWidthFactor, renderHeightFactor;
-	float renderX = 0.0f, renderY = 0.0f;
-	float displayOffsetX, displayOffsetY;
+	// Scissor. The scissor needs to be offset by the framebuffer offset.
+	const int scissorX1 = gstate.getScissorX1();
+	const int scissorY1 = gstate.getScissorY1();
+	const int scissorW = gstate.getScissorX2() + 1 - scissorX1;
+	const int scissorH = gstate.getScissorY2() + 1 - scissorY1;
+
 	if (useBufferedRendering) {
-		displayOffsetX = 0.0f;
-		displayOffsetY = 0.0f;
-		renderWidthFactor = (float)renderWidth / (float)bufferWidth;
-		renderHeightFactor = (float)renderHeight / (float)bufferHeight;
+		const float renderWidthFactor = (float)renderWidth / (float)bufferWidth;
+		const float renderHeightFactor = (float)renderHeight / (float)bufferHeight;
+
+		if (scissorW < 0 || scissorH < 0) {
+			// Bad scissor, kill all drawing with a valid scissor setup.
+			out.scissorX = 0;
+			out.scissorY = 0;
+			out.scissorW = 0;
+			out.scissorH = 0;
+		} else {
+			out.scissorX = (scissorX1 + gstate_c.curRTOffsetX) * renderWidthFactor;
+			out.scissorY = (scissorY1 + gstate_c.curRTOffsetY) * renderHeightFactor;
+			out.scissorW = scissorW * renderWidthFactor;
+			out.scissorH = scissorH * renderHeightFactor;
+		}
+		out.viewportX = 0.0f;
+		out.viewportY = 0.0f;
+		out.viewportW = gstate_c.curRTWidth * renderWidthFactor;
+		out.viewportH = gstate_c.curRTHeight * renderHeightFactor;
 	} else {
+		// Hacky path for non-buffered rendering.
 		float pixelW = PSP_CoreParameter().pixelWidth;
 		float pixelH = PSP_CoreParameter().pixelHeight;
 		FRect frame = GetScreenFrame(config.bIgnoreScreenInsets, pixelW, pixelH);
 		FRect rc;
 		CalculateDisplayOutputRect(config, &rc, 480, 272, frame, ROTATION_LOCKED_HORIZONTAL);
-		displayOffsetX = rc.x;
-		displayOffsetY = rc.y;
+		const float displayOffsetX = rc.x;
+		const float displayOffsetY = rc.y;
 		renderWidth = rc.w;
 		renderHeight = rc.h;
-		renderWidthFactor = renderWidth / 480.0f;
-		renderHeightFactor = renderHeight / 272.0f;
+		const float renderWidthFactor = renderWidth / 480.0f;
+		const float renderHeightFactor = renderHeight / 272.0f;
+		if (scissorW < 0 || scissorH < 0) {
+			// Bad scissor, kill all drawing with a valid scissor setup.
+			out.scissorX = 0;
+			out.scissorY = 0;
+			out.scissorW = 0;
+			out.scissorH = 0;
+		} else {
+			out.scissorX = displayOffsetX + (scissorX1 + gstate_c.curRTOffsetX) * renderWidthFactor;
+			out.scissorY = displayOffsetY + (scissorY1 + gstate_c.curRTOffsetY) * renderHeightFactor;
+			out.scissorW = scissorW * renderWidthFactor;
+			out.scissorH = scissorH * renderHeightFactor;
+		}
+
+		out.viewportX = displayOffsetX;
+		out.viewportY = displayOffsetY;
+		out.viewportW = gstate_c.curRTWidth * renderWidthFactor;
+		out.viewportH = gstate_c.curRTHeight * renderHeightFactor;
 	}
-
-	// Scissor
-	int scissorX1 = gstate.getScissorX1();
-	int scissorY1 = gstate.getScissorY1();
-	int scissorX2 = gstate.getScissorX2() + 1;
-	int scissorY2 = gstate.getScissorY2() + 1;
-
-	if (scissorX2 < scissorX1 || scissorY2 < scissorY1) {
-		out.scissorX = 0;
-		out.scissorY = 0;
-		out.scissorW = 0;
-		out.scissorH = 0;
-	} else {
-		out.scissorX = displayOffsetX + scissorX1 * renderWidthFactor;
-		out.scissorY = displayOffsetY + scissorY1 * renderHeightFactor;
-		out.scissorW = (scissorX2 - scissorX1) * renderWidthFactor;
-		out.scissorH = (scissorY2 - scissorY1) * renderHeightFactor;
-	}
-
-	int curRTWidth = gstate_c.curRTWidth;
-	int curRTHeight = gstate_c.curRTHeight;
-
-	out.viewportX = displayOffsetX;
-	out.viewportY = displayOffsetY;
-	out.viewportW = curRTWidth * renderWidthFactor;
-	out.viewportH = curRTHeight * renderHeightFactor;
 }
 
 static const BlendFactor genericALookup[11] = {
@@ -796,16 +794,16 @@ void ApplyStencilReplaceAndLogicOpIgnoreBlend(ReplaceAlphaType replaceAlphaWithS
 	// We're not blending, but we may still want to "blend" for stencil.
 	// This is only useful for INCR/DECR/INVERT.  Others can write directly.
 	switch (stencilType) {
-	case STENCIL_VALUE_INCR_4:
-	case STENCIL_VALUE_INCR_8:
+	case STENCIL_VALUE_INCR_4BIT:
+	case STENCIL_VALUE_INCR_8BIT:
 		// We'll add the incremented value output by the shader.
 		blendState.blendEnabled = true;
 		blendState.setFactors(srcBlend, dstBlend, BlendFactor::ONE, BlendFactor::ONE);
 		blendState.setEquation(blendEq, BlendEq::ADD);
 		break;
 
-	case STENCIL_VALUE_DECR_4:
-	case STENCIL_VALUE_DECR_8:
+	case STENCIL_VALUE_DECR_4BIT:
+	case STENCIL_VALUE_DECR_8BIT:
 		// We'll subtract the incremented value output by the shader.
 		blendState.blendEnabled = true;
 		blendState.setFactors(srcBlend, dstBlend, BlendFactor::ONE, BlendFactor::ONE);
@@ -998,13 +996,13 @@ static void ConvertBlendState(GenericBlendState &blendState, FBReadSetting useFB
 			constantAlpha = gstate.getStencilTestRef();
 			break;
 
-		case STENCIL_VALUE_INCR_4:
-		case STENCIL_VALUE_DECR_4:
+		case STENCIL_VALUE_INCR_4BIT:
+		case STENCIL_VALUE_DECR_4BIT:
 			constantAlpha = 16;
 			break;
 
-		case STENCIL_VALUE_INCR_8:
-		case STENCIL_VALUE_DECR_8:
+		case STENCIL_VALUE_INCR_8BIT:
+		case STENCIL_VALUE_DECR_8BIT:
 			constantAlpha = 1;
 			break;
 
@@ -1134,14 +1132,14 @@ static void ConvertBlendState(GenericBlendState &blendState, FBReadSetting useFB
 	if (replaceAlphaWithStencil != REPLACE_ALPHA_NO) {
 		// Let the fragment shader take care of it.
 		switch (ReplaceAlphaWithStencilType()) {
-		case STENCIL_VALUE_INCR_4:
-		case STENCIL_VALUE_INCR_8:
+		case STENCIL_VALUE_INCR_4BIT:
+		case STENCIL_VALUE_INCR_8BIT:
 			// We'll add the increment value.
 			blendState.setFactors(glBlendFuncA, glBlendFuncB, BlendFactor::ONE, BlendFactor::ONE);
 			break;
 
-		case STENCIL_VALUE_DECR_4:
-		case STENCIL_VALUE_DECR_8:
+		case STENCIL_VALUE_DECR_4BIT:
+		case STENCIL_VALUE_DECR_8BIT:
 			// Like add with a small value, but subtracting.
 			blendState.setFactors(glBlendFuncA, glBlendFuncB, BlendFactor::ONE, BlendFactor::ONE);
 			alphaEq = BlendEq::SUBTRACT;
@@ -1179,13 +1177,13 @@ static void ConvertBlendState(GenericBlendState &blendState, FBReadSetting useFB
 			// This won't give a correct value (it multiplies) but it may be better than random values.
 			blendState.setFactors(glBlendFuncA, glBlendFuncB, constantAlphaGL, BlendFactor::ZERO);
 			break;
-		case STENCIL_VALUE_INCR_4:
-		case STENCIL_VALUE_INCR_8:
+		case STENCIL_VALUE_INCR_4BIT:
+		case STENCIL_VALUE_INCR_8BIT:
 			// This won't give a correct value always, but it will try to increase at least.
 			blendState.setFactors(glBlendFuncA, glBlendFuncB, constantAlphaGL, BlendFactor::ONE);
 			break;
-		case STENCIL_VALUE_DECR_4:
-		case STENCIL_VALUE_DECR_8:
+		case STENCIL_VALUE_DECR_4BIT:
+		case STENCIL_VALUE_DECR_8BIT:
 			// This won't give a correct value always, but it will try to decrease at least.
 			blendState.setFactors(glBlendFuncA, glBlendFuncB, constantAlphaGL, BlendFactor::ONE);
 			alphaEq = BlendEq::SUBTRACT;
