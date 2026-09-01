@@ -102,6 +102,8 @@ add_library(Common STATIC
 	Data/Format/ZIMSave.h
 	Data/Hash/Hash.cpp
 	Data/Hash/Hash.h
+	Data/Text/Demangle.cpp
+	Data/Text/Demangle.h
 	Data/Text/I18n.cpp
 	Data/Text/I18n.h
 	Data/Text/Parsers.cpp
@@ -197,6 +199,7 @@ add_library(Common STATIC
 	GPU/Vulkan/VulkanQueueRunner.h
 	GPU/Vulkan/VulkanFrameData.cpp
 	GPU/Vulkan/VulkanFrameData.h
+	GPU/Vulkan/VulkanPresentation.h
 	GPU/Vulkan/VulkanGraphicsContext.cpp
 	Input/GestureDetector.cpp
 	Input/GestureDetector.h
@@ -280,6 +283,8 @@ add_library(Common STATIC
 	UI/Root.h
 	UI/Screen.cpp
 	UI/Screen.h
+	UI/ScreenManager.cpp
+	UI/ScreenManager.h
 	UI/UI.cpp
 	UI/UI.h
 	UI/Context.cpp

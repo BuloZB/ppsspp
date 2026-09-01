@@ -407,9 +407,12 @@ static u32 ComputeTextureHash(TextureReplacer &replacer, u32 addr, int bufw, int
 	} else {
 		sizeInRAM = (textureBitsPerPixel[format] * bufw * h) >> 3;
 	}
-	const u32 *checkp = (const u32 *)Memory::GetPointer(addr);
+	const u32 *checkp = (const u32 *)Memory::GetPointerOrException(addr);
 
-	if (Memory::IsValidAddress(addr + sizeInRAM)) {
+	// NOTE: I'm not sure we want to align-check the end, so can't use IsValidTextureAddress here.
+	// IsValidAddress on the end address alone isn't enough - the end can land in a different valid
+	// region than the start, e.g. a VRAM texture whose computed end reaches the base of RAM.
+	if (Memory::IsValidRange(addr, sizeInRAM)) {
 		gpuStats.perFrame.numTextureDataBytesHashed += sizeInRAM;
 
 		// return XXH64(checkp, sizeInRAM, 0xBACD7814);
@@ -517,7 +520,8 @@ TextureApplyResult TextureCacheCommon::ApplyTexture(bool doBind) {
 		level = std::max(0, gstate.getTexLevelOffset16() / 16);
 	}
 	const u32 texaddr = gstate.getTextureAddress(level);
-	if (!Memory::IsValidAddress(texaddr)) {
+	_dbg_assert_(texaddr != 0);
+	if (!Memory::IsValidTextureAddress(texaddr)) {
 		// Bind a null texture and return.
 		Unbind();
 		gstate_c.SetTextureIsVideo(false);
@@ -570,7 +574,6 @@ TextureApplyResult TextureCacheCommon::ApplyTexture(bool doBind) {
 		cluthash = 0;
 	}
 	const u64 cachekey = TexCacheEntry::CacheKey(texaddr, texFormat, dim, cluthash);
-
 	int bufw = GetTextureBufw(0, texaddr, texFormat);
 	u8 maxLevel = gstate.getTextureMaxLevel();
 	const bool swizzled = gstate.isTextureSwizzled();
@@ -730,7 +733,7 @@ TextureApplyResult TextureCacheCommon::ApplyTexture(bool doBind) {
 					if (!isVideo) {
 						TexCache::iterator secondIterOld = secondCache_.find(secondKeyOld);
 						if (secondIterOld == secondCache_.end()) {
-							DEBUG_LOG(Log::TexCache, "%08x: Hash changed from old %08x to new %08x, moving old entry to secondary cache.", texaddr, entry->fullhash, newFullHash);
+							DEBUG_LOG(Log::TexCache, "%08x: Hash changed from old %08x to new %08x, moving old entry to secondary cache (%dx%d)", texaddr, entry->fullhash, newFullHash, w, h);
 							// Not yet in the secondary, put it there.
 							secondCache_[secondKeyOld].reset(entry);
 							// Forget the entry.
@@ -738,14 +741,14 @@ TextureApplyResult TextureCacheCommon::ApplyTexture(bool doBind) {
 						} else {
 							// This is expected with video, multiple black frames for example. However, shouldn't really happen much with
 							// other stuff like Gran Turismo or Gods Eater font rendering unless there are hash collisions..
-							DEBUG_LOG(Log::TexCache, "%08x: Second cache already had one with hash %08x (tex has addr %08x)!", texaddr, entry->fullhash, entry->addr);
+							DEBUG_LOG(Log::TexCache, "%08x: Second cache already had one with hash %08x (tex has addr %08x)! (%dx%d)", texaddr, entry->fullhash, entry->addr, w, h);
 							// Just release the old entry, drop it on the ground.
 							ReleaseTexture(entry, true);
 							entry = nullptr;
 						}
 					} else {
 						// Just release the old video entry, drop it on the ground.
-						VERBOSE_LOG(Log::TexCache, "%08x: Dropping old invalidated video image", texaddr);
+						VERBOSE_LOG(Log::TexCache, "%08x: Dropping old invalidated video image (%dx%d)", texaddr, w, h);
 						ReleaseTexture(entry, true);
 						entry = nullptr;
 					}
@@ -774,7 +777,7 @@ TextureApplyResult TextureCacheCommon::ApplyTexture(bool doBind) {
 							}
 							return ApplyTextureFinish(entry, doBind);
 						} else {
-							DEBUG_LOG(Log::TexCache, "%08x: Entry in secondary cache not suitable, ignoring and creating new: %08x", texaddr, newFullHash);
+							DEBUG_LOG(Log::TexCache, "%08x: Entry in secondary cache not suitable, ignoring and creating new: %08x (%dx%d)", texaddr, newFullHash, w, h);
 							// The entry in the secondary cache doesn't match our current parameters, so we can't use it.
 							// Let's leave it in there for now (revisit later).
 						}
@@ -798,7 +801,7 @@ TextureApplyResult TextureCacheCommon::ApplyTexture(bool doBind) {
 				return ApplyTextureFinish(entry, doBind);
 			}
 		} else {
-			DEBUG_LOG(Log::TexCache, "%08x: Texture was not a match (%s), recreating.", texaddr, reason);
+			DEBUG_LOG(Log::TexCache, "%08x: Texture was not a match (%s), recreating (%dx%d).", texaddr, reason, w, h);
 			// Wasn't a match even in format. Let's just delete it right away, since we know we need to rebuild it,
 			// and it's unlikely that putting it in the secondary cache will do us any good. We do that for things we rehash, though.
 			ReleaseTexture(entryIter->second.get(), true);
@@ -820,8 +823,10 @@ TextureApplyResult TextureCacheCommon::ApplyTexture(bool doBind) {
 	def.format = texFormat;
 	def.bufw = bufw;
 
+	const bool isPPGE = IsPPGEAtlasFakeAddress(texaddr, nullptr);
+
 	AttachCandidate bestCandidate;
-	if (GetBestFramebufferCandidate(framebufferManager_, def, 0, &bestCandidate, "texture")) {
+	if (!isPPGE && GetBestFramebufferCandidate(framebufferManager_, def, 0, &bestCandidate, "texture")) {
 		RasterChannel channel;
 		VirtualFramebuffer *framebuffer = SetTextureFramebuffer(bestCandidate, &channel);  // sets curTexture3D
 		TextureApplyResult result;
@@ -829,7 +834,9 @@ TextureApplyResult TextureCacheCommon::ApplyTexture(bool doBind) {
 		ForgetLastTexture();
 		if (framebuffer) {
 			// ApplyTextureFramebuffer is responsible for setting SetTextureFullAlpha.
-			ApplyTextureFramebuffer(framebuffer, gstate.getTextureFormat(), channel);
+			if (doBind) {
+				ApplyTextureFramebuffer(framebuffer, gstate.getTextureFormat(), channel);
+			}
 			result.framebuffer = framebuffer;
 			result.framebufferTextureChannel = channel;
 			framebuffer = nullptr;
@@ -850,9 +857,9 @@ TextureApplyResult TextureCacheCommon::ApplyTexture(bool doBind) {
 	TexCacheEntry *entry = new TexCacheEntry{};
 	cache_[cachekey].reset(entry);
 	entry->status = {};
-	if (PPGeIsFontTextureAddress(texaddr)) {
+	if (isPPGE) {
 		// It's the builtin font texture.
-		entry->status |= TexStatus::RELIABLE;
+		entry->status |= TexStatus::RELIABLE | TexStatus::IS_PPGE_ATLAS;
 	}
 
 	if (hasClutGPU) {
@@ -895,9 +902,13 @@ TextureApplyResult TextureCacheCommon::ApplyTexture(bool doBind) {
 	gstate_c.curTextureWidth = w;
 	gstate_c.curTextureHeight = h;
 	UpdateMaxSeenV(entry, gstate.isModeThrough());  // Critical to update this before hashing! As it's used to decide the hash range.
-	entry->fullhash = ComputeTextureHash(replacer_, entry->addr, entry->bufw, w, h, swizzled, entry);
 
-	DEBUG_LOG(Log::TexCache, "%08x: Creating new texture, hash %08x (maxSeenV=%d), w: %d h: %d, creating", texaddr, entry->fullhash, entry->maxSeenV, w, h);
+	// TODO: Avoid hashing known video textures.
+	if (!(entry->status & TexStatus::IS_PPGE_ATLAS)) {
+		entry->fullhash = ComputeTextureHash(replacer_, entry->addr, entry->bufw, w, h, swizzled, entry);
+	}
+
+	VERBOSE_LOG(Log::TexCache, "%08x: Creating new texture, hash %08x (maxSeenV=%d), w: %d h: %d, creating", texaddr, entry->fullhash, entry->maxSeenV, w, h);
 
 	BuildTexture(entry);
 	ForgetLastTexture();  // is this needed?
@@ -1494,7 +1505,7 @@ void TextureCacheCommon::LoadClut(u32 clutAddr, u32 loadBytes, GPURecord::Record
 	clutTotalBytes_ = loadBytes;
 	clutRenderAddress_ = 0xFFFFFFFF;
 
-	if (!Memory::IsValidAddress(clutAddr)) {
+	if (!Memory::IsValidCLUTAddress(clutAddr)) {
 		memset(clutBufRaw_, 0x00, loadBytes);
 		// Reload the clut next time (should we really do it in this case?)
 		clutLastFormat_ = 0xFFFFFFFF;
@@ -1503,6 +1514,8 @@ void TextureCacheCommon::LoadClut(u32 clutAddr, u32 loadBytes, GPURecord::Record
 	}
 
 	if (Memory::IsVRAMAddress(clutAddr)) {
+		// If we're loading the CLUT from VRAM, it might be directly from a framebuffer. This is used for some fancy effects.
+
 		// Clear the uncached and mirror bits, etc. to match framebuffers.
 		const u32 clutLoadAddr = clutAddr & 0x041FFFFF;
 		const u32 clutLoadEnd = clutLoadAddr + loadBytes;
@@ -1954,7 +1967,11 @@ TextureAlpha TextureCacheCommon::DecodeTextureLevel(u8 *out, int outPitch, GETex
 
 	int w = gstate.getTextureWidth(level);
 	int h = gstate.getTextureHeight(level);
-	const u8 *texptr = Memory::GetPointer(texaddr);
+
+	u32 ppgeOffset;
+	const bool isPPGE = IsPPGEAtlasFakeAddress(texaddr, &ppgeOffset);
+
+	const u8 *texptr = isPPGE ? (PPGeAtlasGetData() + ppgeOffset) : Memory::GetPointerOrException(texaddr);
 	const uint32_t byteSize = (textureBitsPerPixel[format] * bufw * h) / 8;
 
 	// Validate the texture data fits in mapped RAM, like the DXT path does.
@@ -1964,7 +1981,7 @@ TextureAlpha TextureCacheCommon::DecodeTextureLevel(u8 *out, int outPitch, GETex
 	// Swizzled textures are read in 8-row blocks, rounding the height up.
 	const uint32_t rows = swizzled ? ((h + 7) & ~7) : h;
 	const uint32_t neededBytes = bytesPerRow * rows;
-	if (bytesPerRow > 0 && !Memory::IsValidRange(texaddr, neededBytes)) {
+	if (bytesPerRow > 0 && !isPPGE && !Memory::IsValidRange(texaddr, neededBytes)) {
 		ERROR_LOG_REPORT(Log::G3D, "Texture extends beyond valid RAM: %08x + %d x %d", texaddr, bufw, h);
 		uint32_t limited = Memory::ClampValidSizeAt(texaddr, neededBytes);
 		h = limited / bytesPerRow;
@@ -1972,9 +1989,11 @@ TextureAlpha TextureCacheCommon::DecodeTextureLevel(u8 *out, int outPitch, GETex
 			h &= ~7;
 	}
 
-	char buf[128];
-	size_t len = snprintf(buf, sizeof(buf), "Tex_%08x_%dx%d_%s", texaddr, w, h, GeTextureFormatToString(format, clutformat));
-	NotifyMemInfo(MemBlockFlags::TEXTURE, texaddr, byteSize, buf, len);
+	if (!isPPGE) {
+		char buf[128];
+		size_t len = snprintf(buf, sizeof(buf), "Tex_%08x_%dx%d_%s", texaddr, w, h, GeTextureFormatToString(format, clutformat));
+		NotifyMemInfo(MemBlockFlags::TEXTURE, texaddr, byteSize, buf, len);
+	}
 
 	switch (format) {
 	case GE_TFMT_CLUT4:
@@ -2756,7 +2775,7 @@ bool TextureCacheCommon::PrepareBuildTexture(BuildTexturePlan &plan, TexCacheEnt
 	for (int i = 0; i < plan.levelsToLoad; i++) {
 		// If encountering levels pointing to nothing, adjust max level.
 		u32 levelTexaddr = gstate.getTextureAddress(i);
-		if (!Memory::IsValidAddress(levelTexaddr)) {
+		if (!Memory::IsValidTextureAddress(levelTexaddr)) {
 			plan.levelsToLoad = i;
 			break;
 		}
@@ -2846,6 +2865,8 @@ bool TextureCacheCommon::PrepareBuildTexture(BuildTexturePlan &plan, TexCacheEnt
 		// These will only work correctly in the top 512x512 part. So, I've increased the threshold quite a bit.
 		// We probably should handle these differently, by clamping the texture size and texture coordinates, but meh.
 		if (plan.w > 2048 || plan.h > 2048) {
+			// Strangely, the homebrew "Kitten Cannon" hits this a bunch, with a clearly invalid 512x32768 texture.
+			// Some noise bit in the texture size command that we might just want to ignore.
 			ERROR_LOG(Log::TexCache, "Bad texture dimensions: %dx%d", plan.w, plan.h);
 			return false;
 		}
@@ -3088,5 +3109,12 @@ std::string TexStatusToString(TexStatus status) {
 	if (status & TexStatus::VIDEO) {
 		result += "VIDEO ";
 	}
+	if (status & TexStatus::RELIABLE) {
+		result += "RELIABLE ";
+	}
+	if (status & TexStatus::IS_PPGE_ATLAS) {
+		result += "IS_PPGE_ATLAS ";
+	}
+
 	return result.empty() ? "None" : result;
 }

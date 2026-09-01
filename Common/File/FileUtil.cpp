@@ -668,7 +668,10 @@ bool CreateDir(const Path &path, bool quiet) {
 		return false;
 	}
 
-	DEBUG_LOG(Log::IO, "CreateDir('%s')", path.c_str());
+	if (!quiet) {
+		DEBUG_LOG(Log::IO, "CreateDir('%s')", path.c_str());
+	}
+
 #ifdef HAVE_LIBRETRO_VFS
 	switch (LibretroMkdir(path.ToString().c_str())) {
 		case -2:
@@ -724,6 +727,11 @@ bool CreateFullPath(const Path &path) {
 	if (File::Exists(path)) {
 		VERBOSE_LOG(Log::IO, "CreateFullPath: path exists %s", path.ToVisualString().c_str());
 		return true;
+	}
+
+	if (path.empty()) {
+		ERROR_LOG(Log::IO, "Can't create an empty path");
+		return false;
 	}
 
 	switch (path.Type()) {
@@ -1435,7 +1443,7 @@ uint8_t *ReadLocalFile(const Path &filename, size_t *size) {
 		return nullptr;
 	}
 	Fseek(file, 0, SEEK_SET);
-	// NOTE: If you find ~10 memory leaks from here, with very varying sizes, it might be the VFPU LUTs.
+	// NOTE: If you find up to ~10-ish memory leaks from here, with very varying sizes, it might be the VFPU LUTs.
 	uint8_t *contents = new uint8_t[f_size + 1];
 	if (fread(contents, 1, f_size, file) != f_size) {
 		delete[] contents;

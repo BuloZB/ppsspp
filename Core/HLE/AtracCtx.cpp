@@ -165,7 +165,7 @@ void Atrac::ResetData() {
 }
 
 u8 *Atrac::BufferStart() {
-	return ignoreDataBuf_ ? Memory::GetPointerWrite(first_.addr) : dataBuf_;
+	return ignoreDataBuf_ ? Memory::GetPointerWriteOrException(first_.addr) : dataBuf_;
 }
 
 AtracBase::~AtracBase() {
@@ -969,7 +969,7 @@ int Atrac::EnqueueForSas(u32 bufPtr, u32 bytesToAdd) {
 	if (addbytes < 0)
 		addbytes = 0;
 	if (addbytes > 0) {
-		Memory::Memcpy(dataBuf_ + destOffset, bufPtr, (size_t)addbytes, "AtracAddStreamData");
+		Memory::Memcpy(dataBuf_ + destOffset, bufPtr, (u32)addbytes, "AtracAddStreamData");
 	}
 	first_.size += bytesToAdd;
 	if (first_.size >= track_.fileSize) {

@@ -188,6 +188,7 @@ void VagDecoder::DoState(PointerWrap &p) {
 	Do(p, end_);
 }
 
+// The context pointer is assumed to be valid.
 int SasAtrac3::SetContext(u32 contextAddr) {
 	contextAddr_ = contextAddr;
 	// Note: On hardware, atracID_ is also stored in the loopNum member of the context.
@@ -640,8 +641,8 @@ void SasInstance::Mix(u32 outAddr, u32 inAddr, int leftVol, int rightVol, bool m
 	// Then mix the send buffer in with the rest.
 
 	// Alright, all voices mixed. Let's convert and clip, and at the same time, wipe mixBuffer for next time. Could also dither.
-	s16 *outp = (s16 *)Memory::GetPointerWriteRange(outAddr, 4 * grainSize);
-	const s16 *inp = inAddr ? (const s16 *)Memory::GetPointerRange(inAddr, 4 * grainSize) : 0;
+	s16 *outp = (s16 *)Memory::GetPointerWriteRangeOrException(outAddr, 4 * grainSize);
+	const s16 *inp = inAddr ? (const s16 *)Memory::GetPointerRangeOrException(inAddr, 4 * grainSize) : 0;
 	if (!outp) {
 		WARN_LOG_REPORT(Log::sceSas, "Bad SAS Mix output address: %08x, grain=%d", outAddr, grainSize);
 	} else if (outputMode == PSP_SAS_OUTPUTMODE_MIXED) {

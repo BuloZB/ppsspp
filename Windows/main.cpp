@@ -144,7 +144,6 @@ void System_LaunchUrl(LaunchUrlType urlType, std::string_view url) {
 	case LaunchUrlType::BROWSER_URL:
 	case LaunchUrlType::LOCAL_FILE:
 	case LaunchUrlType::LOCAL_FOLDER:
-	case LaunchUrlType::MARKET_URL:
 	case LaunchUrlType::EMAIL_ADDRESS:
 		// ShellExecute handles everything.
 	{
@@ -508,7 +507,7 @@ void System_Notify(SystemNotification notification) {
 	case SystemNotification::BOOT_DONE:
 	{
 		if (g_symbolMap)
-			g_symbolMap->SortSymbols();  // internal locking is performed here
+			g_symbolMap->SortSymbols();  // Always fired from the CPU/NativeFrame thread, see AGENTS.md
 		PostMessage(MainWindow::GetHWND(), WM_USER + 1, 0, 0);
 
 		if (Achievements::HardcoreModeActive()) {
@@ -548,7 +547,7 @@ void System_Notify(SystemNotification notification) {
 
 	case SystemNotification::SYMBOL_MAP_UPDATED:
 		if (g_symbolMap)
-			g_symbolMap->SortSymbols();  // internal locking is performed here
+			g_symbolMap->SortSymbols();  // Always fired from the CPU/NativeFrame thread, see AGENTS.md
 		PostMessage(MainWindow::GetHWND(), WM_USER + 1, 0, 0);
 		break;
 
@@ -632,6 +631,8 @@ static std::wstring MakeWindowsFilter(BrowseFileType type) {
 	switch (type) {
 	case BrowseFileType::BOOTABLE:
 		return FinalizeFilter(L"All supported file types (*.iso *.cso *.chd *.pbp *.elf *.prx *.zip *.ppdmp)|*.pbp;*.elf;*.iso;*.cso;*.chd;*.prx;*.zip;*.ppdmp|PSP ROMs (*.iso *.cso *.chd *.pbp *.elf *.prx)|*.pbp;*.elf;*.iso;*.cso;*.chd;*.prx|Homebrew/Demos installers (*.zip)|*.zip|All files (*.*)|*.*||");
+	case BrowseFileType::SAVE_STATE:
+		return FinalizeFilter(L"Save state files (*.ppst)|*.ppst|All files (*.*)|*.*||");
 	case BrowseFileType::INI:
 		return FinalizeFilter(L"Ini files (*.ini)|*.ini|All files (*.*)|*.*||");
 	case BrowseFileType::ZIP:
@@ -888,9 +889,6 @@ static std::string GetDefaultLangRegion() {
 	}
 }
 
-bool System_SendDebugOutput(std::string_view data) { return false; }
-void System_SendDebugScreenshot(const uint8_t *data, int width, int height) {}
-
 static const int EXIT_CODE_VULKAN_WORKS = 42;
 
 #ifndef _DEBUG
@@ -928,12 +926,10 @@ std::vector<std::wstring> GetWideCmdLine() {
 }
 
 static void InitMemstickDirectory() {
-	if (!g_Config.memStickDirectory.empty() && !g_Config.flash0Directory.empty())
+	if (!g_Config.memStickDirectory.empty() && !g_Config.nandRootDirectory.empty())
 		return;
 
 	const Path &exePath = File::GetExeDirectory();
-	// Mount a filesystem
-	g_Config.flash0Directory = exePath / "assets/flash0";
 
 	// Caller sets this to the Documents folder.
 	const Path rootMyDocsPath = g_Config.internalDataDirectory;
@@ -1035,16 +1031,20 @@ static GraphicsContext *CreateGraphicsContext(GPUBackend backend, std::string **
 		*deviceName = nullptr;
 		break;
 #endif
+#if PPSSPP_PLATFORM(WINDOWS)
 	case GPUBackend::DIRECT3D11:
 		graphicsContext = new D3D11Context();
 		*deviceName = &g_Config.sD3D11Device;
 		break;
+#endif
+#if !PPSSPP_PLATFORM(UWP)
 	case GPUBackend::VULKAN:
 	default:
 		graphicsContext = new VulkanGraphicsContext();
 		*deviceName = &g_Config.sVulkanDevice;
 		break;
 	}
+#endif
 	return graphicsContext;
 }
 
@@ -1232,7 +1232,13 @@ int WINAPI WinMain(HINSTANCE _hInstance, HINSTANCE hPrevInstance, LPSTR szCmdLin
 	System_SetWindowTitle("");
 	System_Notify(SystemNotification::UI);
 
-	std::thread mainThread = std::thread([]() {
+	WindowDesc desc;
+	desc.winsys = WINDOWSYSTEM_WIN32;
+	desc.data1 = MainWindow::GetHInstance();
+	desc.data2 = MainWindow::GetHWND();
+
+	std::thread mainThread = std::thread([desc]() {
+		// TODO: We can really merge all of this into MainThreadFunc
 		std::string errorMessage;
 		std::string *deviceNameSetting;
 		std::unique_ptr<GraphicsContext> graphicsContext(CreateGraphicsContext((GPUBackend)g_Config.iGPUBackend, &deviceNameSetting));
@@ -1240,8 +1246,12 @@ int WINAPI WinMain(HINSTANCE _hInstance, HINSTANCE hPrevInstance, LPSTR szCmdLin
 			HandleGraphicsFailure(errorMessage);
 			return;
 		}
-		if (!MainThreadFunc(graphicsContext.get(), new NativeApplication(), WINDOWSYSTEM_WIN32, MainWindow::GetHInstance(), MainWindow::GetHWND(), []() {})) {
-			HandleGraphicsFailure("Failed to initialize main thread function.");
+		if (!MainThreadFunc(graphicsContext.get(), new NativeApplication(), desc,
+			[](GraphicsContext *graphicsContext) {
+				NativeFrame(graphicsContext);
+				return GetUIState() != UISTATE_EXIT;
+		}, &errorMessage)) {
+			HandleGraphicsFailure(errorMessage);
 			return;
 		}
 		graphicsContext->ShutdownAPI();

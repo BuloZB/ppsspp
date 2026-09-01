@@ -256,9 +256,9 @@ static int sceAudiocodecDecode(u32 ctxPtr, int codec) {
 
 		DEBUG_LOG(Log::ME, "decoder. in: %08x out: %08x unk40: %02x unk41: %02x", ctx->inBuf, ctx->outBuf, ctx->unk40, ctx->unk41);
 
-		int16_t *outBuf = (int16_t *)Memory::GetPointerWrite(ctx->outBuf);
+		int16_t *outBuf = (int16_t *)Memory::GetPointerWriteOrException(ctx->outBuf);
 
-		bool result = decoder->Decode(Memory::GetPointer(ctx->inBuf), bytesPerFrame, &inDataConsumed, 2, outBuf, &outSamples);
+		bool result = decoder->Decode(Memory::GetPointerOrException(ctx->inBuf), bytesPerFrame, &inDataConsumed, 2, outBuf, &outSamples);
 		if (!result) {
 			ctx->err = 0x20b;
 			ERROR_LOG(Log::ME, "AudioCodec decode failed. Setting error to %08x", ctx->err);
@@ -267,7 +267,7 @@ static int sceAudiocodecDecode(u32 ctxPtr, int codec) {
 		ctx->srcBytesRead = inDataConsumed;
 		ctx->dstSamplesWritten = outSamples;
 	}
-	return hleLogDebug(Log::ME, 0, "codec %s", GetCodecName(codec));
+	return hleLogDebug(Log::ME, 0, "codec %s sampleRate: %d bytesPerFrame: %d channels: %d", GetCodecName(codec), sampleRate, bytesPerFrame, channels);
 }
 
 // This is used by sceMp3, in Beats.

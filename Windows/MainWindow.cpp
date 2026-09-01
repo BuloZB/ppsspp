@@ -725,8 +725,12 @@ namespace MainWindow {
 			{
 				return 0;
 			}
-			// Get all modules from symbol map
-			auto modules = g_symbolMap->getAllModules();
+			// Get all modules from symbol map. Reading it here on the GUI thread would otherwise
+			// race with the CPU thread - hold g_frameMutex for the duration of the read, which
+			// NativeFrame() also holds while it's actually touching that state. See g_frameMutex
+			// in Core.h.
+			std::lock_guard<std::mutex> frameGuard(g_frameMutex);
+			std::vector<LoadedModuleInfo> modules = g_symbolMap->getAllModules();
 			for (const auto& module : modules)
 			{
 				if (module.name == moduleName)
@@ -1013,22 +1017,25 @@ namespace MainWindow {
 				return TRUE;
 
 			case VERYSLEEPY_WPARAM_GETADDRINFO:
-				{
+			{
+				Core_RunOnCPUThread([lParam]() {
+					// This is called from VerySleepy, which is on a different thread than the CPU thread.
+					// We need to run this on the CPU thread to avoid race conditions.
 					VerySleepy_AddrInfo *info = (VerySleepy_AddrInfo *)lParam;
 					const u8 *ptr = (const u8 *)info->addr;
 					std::string name;
 
-					std::lock_guard<std::recursive_mutex> guard(MIPSComp::jitLock);
 					if (MIPSComp::jit && MIPSComp::jit->DescribeCodePtr(ptr, name)) {
 						swprintf_s(info->name, L"Jit::%S", name.c_str());
-						return TRUE;
+						return;
 					}
 					if (gpu && gpu->DescribeCodePtr(ptr, name)) {
 						swprintf_s(info->name, L"GPU::%S", name.c_str());
-						return TRUE;
+						return;
 					}
-				}
-				return FALSE;
+				});
+				return TRUE;
+			}
 
 			default:
 				return FALSE;

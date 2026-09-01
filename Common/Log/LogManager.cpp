@@ -60,6 +60,7 @@ static const char level_to_char[8] = "-NEWIDV";
 void AndroidLog(const LogMessage &message);
 #endif
 
+// TODO: Get rid of this wrapper, not much point.
 void GenericLog(Log type, LogLevel level, const char *file, int line, const char* fmt, ...) {
 	va_list args;
 	va_start(args, fmt);
@@ -146,9 +147,12 @@ void LogManager::Shutdown() {
 		return;
 	}
 
-	if (fp_) {
-		fclose(fp_);
-		fp_ = nullptr;
+	{
+		std::lock_guard<std::mutex> lk(logFileLock_);
+		if (fp_) {
+			fclose(fp_);
+			fp_ = nullptr;
+		}
 	}
 
 	outputs_ = (LogOutput)0;
@@ -193,6 +197,7 @@ LogManager::~LogManager() {
 }
 
 void LogManager::SetFileLogPath(const Path &filename) {
+	std::lock_guard<std::mutex> lk(logFileLock_);
 	if (fp_ && filename == logFilename_) {
 		// All good
 		return;
@@ -200,21 +205,29 @@ void LogManager::SetFileLogPath(const Path &filename) {
 
 	if (fp_) {
 		fclose(fp_);
+		fp_ = nullptr;
 	}
 
-	logFilename_ = Path(filename);
+	if (!filename.empty()) {
+		logFilename_ = Path(filename);
 
-	if (outputs_ & LogOutput::File) {
-		File::CreateFullPath(logFilename_.NavigateUp());
-		fp_ = File::OpenCFile(logFilename_, "at");
-		logFileOpenFailed_ = fp_ == nullptr;
-		if (logFileOpenFailed_) {
-			printf("Failed to open log file %s\n", logFilename_.c_str());
+		if (outputs_ & LogOutput::File) {
+			File::CreateFullPath(logFilename_.NavigateUp());
+			fp_ = File::OpenCFile(logFilename_, "at");
+			logFileOpenFailed_ = fp_ == nullptr;
+			if (logFileOpenFailed_) {
+				printf("Failed to open log file %s\n", logFilename_.c_str());
+			}
 		}
 	}
 }
 
 void LogManager::SaveConfig(Section *section) {
+	if (channelsChangedByDebugger_) {
+		// Leave the section as whatever was already on disk - see the doc comment on
+		// NotifyChannelsChangedByDebugger().
+		return;
+	}
 	for (int i = 0; i < (int)Log::NUMBER_OF_LOGS; i++) {
 		section->Set((std::string(g_logTypeNames[i]) + "Enabled"), g_log[i].enabled);
 		section->Set((std::string(g_logTypeNames[i]) + "Level"), (int)g_log[i].level);
@@ -315,8 +328,9 @@ void LogManager::LogLine(LogLevel level, Log type, const char *file, int line, c
 
 	// OK, now go through the possible listeners in order.
 	if (outputs_ & LogOutput::File) {
+		// Lock covers the fp_ check too - SetFileLogPath()/Shutdown() can close it concurrently.
+		std::lock_guard<std::mutex> lk(logFileLock_);
 		if (fp_) {
-			std::lock_guard<std::mutex> lk(logFileLock_);
 			fprintf(fp_, "%s %s %s", message.timestamp, message.header, message.msg.c_str());
 			// Is this really necessary to do every time? I guess to catch the last message before a crash..
 			fflush(fp_);

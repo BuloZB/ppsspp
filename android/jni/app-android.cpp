@@ -136,7 +136,6 @@ static std::string boardName;
 
 std::string g_externalDir;  // Original external dir (root of Android storage).
 std::string g_extFilesDir;  // App private external dir.
-std::string g_nativeLibDir;  // App native library dir
 
 static std::vector<std::string> g_additionalStorageDirs;
 
@@ -284,16 +283,12 @@ void System_Vibrate(int length_ms) {
 void System_LaunchUrl(LaunchUrlType urlType, std::string_view url) {
 	switch (urlType) {
 	case LaunchUrlType::BROWSER_URL: PushCommand("launchBrowser", url); break;
-	case LaunchUrlType::MARKET_URL: PushCommand("launchMarket", url); break;
 	case LaunchUrlType::EMAIL_ADDRESS: PushCommand("launchEmail", url); break;
 	// Can't really support the below well on Android...
 	case LaunchUrlType::LOCAL_FOLDER: break;
 	case LaunchUrlType::LOCAL_FILE: break;
 	}
 }
-
-bool System_SendDebugOutput(std::string_view data) { return false; }
-void System_SendDebugScreenshot(const uint8_t *data, int width, int height) {}
 
 std::string System_GetProperty(SystemProperty prop) {
 	switch (prop) {
@@ -695,7 +690,7 @@ extern "C" void Java_org_ppsspp_ppsspp_NativeApp_init
 
 	g_externalDir = externalStorageDir;
 	g_extFilesDir = externalFilesDir;
-	g_nativeLibDir = nativeLibDir;
+	VulkanSetNativeLibDir(nativeLibDir);
 
 	if (!additionalStorageDirsString.empty()) {
 		SplitString(additionalStorageDirsString, ':', g_additionalStorageDirs);
@@ -902,6 +897,7 @@ extern "C" void Java_org_ppsspp_ppsspp_NativeApp_shutdown(JNIEnv *, jclass) {
 
 	if (renderer_inited && graphicsContext && graphicsContext->NeedsSeparateEmuThread()) {
 		// Only used in Java EGL path.
+		INFO_LOG(Log::System, "Joining emuthread.");
 		EmuThread_Join(graphicsContext, g_emuThread);
 
 		INFO_LOG(Log::System, "EmuThread joined.");
@@ -958,16 +954,17 @@ extern "C" jboolean Java_org_ppsspp_ppsspp_NativeRenderer_displayInit(JNIEnv * e
 		}, nullptr);
 
 		// This is where we start the emuthread now - after InitFromRenderThread. This eliminates a race condition.
-		g_emuThread = EmuThread_Start(graphicsContext, new NativeApplication(), []() {
+		g_emuThread = EmuThread_Start(graphicsContext, new NativeApplication(), [](GraphicsContext *graphicsContext) {
+			NativeFrame(graphicsContext);
 			ProcessFrameCommands();
+			return true;
 		});
 		renderer_inited = true;
 	} else {
 		// Would be really nice if we could get something on the GL thread immediately when shutting down,
 		// but the only mechanism for handling lost devices seems to be that onSurfaceCreated is called again,
 		// which ends up calling displayInit.
-
-		INFO_LOG(Log::G3D, "NativeApp.displayInit() restoring");
+		INFO_LOG(Log::G3D, "NativeApp.displayInit(): Second time, joining the emuthread and starting it up again.");
 		EmuThread_Join(graphicsContext, g_emuThread);
 
 		graphicsContext->ShutdownSurface();
@@ -983,8 +980,10 @@ extern "C" jboolean Java_org_ppsspp_ppsspp_NativeRenderer_displayInit(JNIEnv * e
 			g_OSD.Show(OSDType::MESSAGE_ERROR, details, 5.0);
 		}, nullptr);
 
-		g_emuThread = EmuThread_Start(graphicsContext, new NativeApplication(), []() {
+		g_emuThread = EmuThread_Start(graphicsContext, new NativeApplication(), [](GraphicsContext *graphicsContext) {
+			NativeFrame(graphicsContext);
 			ProcessFrameCommands();
+			return true;
 		});
 
 		INFO_LOG(Log::G3D, "Restored.");
@@ -1157,8 +1156,9 @@ extern "C" void Java_org_ppsspp_ppsspp_NativeRenderer_displayRender(JNIEnv *env,
 	}
 	_assert_(graphicsContext->NeedsSeparateEmuThread());
 
-	if (!graphicsContext->ThreadFrame(true)) {
+	if (!graphicsContext->ThreadFrame()) {
 		INFO_LOG(Log::G3D, "ThreadFrame returned false");
+		// TODO: We should stop calling ThreadFrame here.
 		return;
 	}
 
@@ -1394,6 +1394,8 @@ extern "C" void JNICALL Java_org_ppsspp_ppsspp_NativeApp_sendMessageFromJava(JNI
 		} else if (prm == "local_network") {
 			INFO_LOG(Log::System, "LOCAL NETWORK PERMISSION: DENIED");
 			permissions[SYSTEM_PERMISSION_LOCAL_NETWORK] = PERMISSION_STATUS_DENIED;
+		} else {
+			WARN_LOG(Log::System, "UNKNOWN PERMISSION GRANTED: %s", prm.c_str());
 		}
 	} else if (msg == "permission_granted") {
 		if (prm == "storage") {
@@ -1402,6 +1404,8 @@ extern "C" void JNICALL Java_org_ppsspp_ppsspp_NativeApp_sendMessageFromJava(JNI
 		} else if (prm == "local_network") {
 			INFO_LOG(Log::System, "LOCAL NETWORK PERMISSION: GRANTED");
 			permissions[SYSTEM_PERMISSION_LOCAL_NETWORK] = PERMISSION_STATUS_GRANTED;
+		} else {
+			WARN_LOG(Log::System, "UNKNOWN PERMISSION GRANTED: %s", prm.c_str());
 		}
 		System_PostUIMessage(UIMessage::PERMISSION_GRANTED, prm);
 	} else if (msg == "sustained_perf_supported") {
@@ -1701,7 +1705,11 @@ static void VulkanEmuThread(ANativeWindow *wnd, GraphicsContext *graphicsContext
 	}
 
 	renderer_inited = true;
-	RunMainLoop(graphicsContext, new NativeApplication(), []() { return !exitRenderLoop; }, []() { ProcessFrameCommands(); });
+	RunMainLoop(graphicsContext, new NativeApplication(), [](GraphicsContext *graphicsContext) {
+		NativeFrame(graphicsContext);
+		ProcessFrameCommands();
+		return !exitRenderLoop;
+	});
 	renderer_inited = false;
 
 	// Shut the graphics context down to the same state it was in when we entered the render thread.

@@ -63,10 +63,13 @@ TextureReplacer::TextureReplacer(Draw::DrawContext *draw) {
 	}
 
 	// We don't want to keep the draw object around, so extract the info we need.
-	if (draw->GetDataFormatSupport(Draw::DataFormat::BC3_UNORM_BLOCK)) formatSupport_.bc123 = true;
-	if (draw->GetDataFormatSupport(Draw::DataFormat::ASTC_4x4_UNORM_BLOCK)) formatSupport_.astc = true;
-	if (draw->GetDataFormatSupport(Draw::DataFormat::BC7_UNORM_BLOCK)) formatSupport_.bc7 = true;
-	if (draw->GetDataFormatSupport(Draw::DataFormat::ETC2_R8G8B8_UNORM_BLOCK)) formatSupport_.etc2 = true;
+	// In tests, draw may be null; formats then just default to unsupported.
+	if (draw) {
+		if (draw->GetDataFormatSupport(Draw::DataFormat::BC3_UNORM_BLOCK)) formatSupport_.bc123 = true;
+		if (draw->GetDataFormatSupport(Draw::DataFormat::ASTC_4x4_UNORM_BLOCK)) formatSupport_.astc = true;
+		if (draw->GetDataFormatSupport(Draw::DataFormat::BC7_UNORM_BLOCK)) formatSupport_.bc7 = true;
+		if (draw->GetDataFormatSupport(Draw::DataFormat::ETC2_R8G8B8_UNORM_BLOCK)) formatSupport_.etc2 = true;
+	}
 }
 
 TextureReplacer::~TextureReplacer() {
@@ -74,6 +77,15 @@ TextureReplacer::~TextureReplacer() {
 		delete iter.second;
 	}
 	delete vfs_;
+}
+
+bool TextureReplacer::LoadPackForTesting(const Path &basePath, std::string *error) {
+	basePath_ = basePath;
+	gameID_ = "";
+	replaceEnabled_ = true;
+	saveEnabled_ = false;
+	replaceEnabled_ = LoadIni(error, false);
+	return replaceEnabled_;
 }
 
 void TextureReplacer::NotifyConfigChanged() {
@@ -97,6 +109,12 @@ void TextureReplacer::NotifyConfigChanged() {
 	}
 
 	if (!replaceEnabled_ && wasReplaceEnabled) {
+		// Everything in levelCache_ holds this pointer - LoadIni fixes them up when it swaps the
+		// VFS, and the same has to happen here or they're left dangling. Decimate(ALL) below only
+		// frees their data, it doesn't erase the entries.
+		for (auto &repl : levelCache_) {
+			repl.second->vfs_ = nullptr;
+		}
 		delete vfs_;
 		vfs_ = nullptr;
 		Decimate(ReplacerDecimateMode::ALL);
@@ -166,6 +184,14 @@ bool TextureReplacer::LoadIni(std::string *error, bool notify) {
 		if (ini.GetOrCreateSection("games")->Get(gameID_.c_str(), &overrideFilename)) {
 			if (overrideFilename == "true") {
 				// Ignore it
+			} else if (HasParentDirComponent(overrideFilename)) {
+				// Same reason the [hashes] filenames are checked: for a directory-backed pack,
+				// DirectoryReader resolves this against the pack directory, so "../.." reaches
+				// anything on disk. Third-party packs are just downloads.
+				*error = "Override ini name must stay inside the pack: '" + overrideFilename + "'";
+				ERROR_LOG(Log::TexReplacement, "%s", error->c_str());
+				delete dir;
+				return false;
 			} else if (!overrideFilename.empty() && overrideFilename != INI_FILENAME) {
 				IniFile overrideIni;
 				iniLoaded = overrideIni.LoadFromVFS(*dir, overrideFilename);
@@ -538,6 +564,8 @@ u32 TextureReplacer::ComputeHash(u32 addr, int bufw, int w, int h, bool swizzled
 		reduceHashSize = LookupReduceHashRange(w, h);
 		// default to reduceHashGlobalValue which default is 0.5
 	}
+	// It's a reduction factor and comes from the pack's ini, so don't let it hash more than the texture.
+	reduceHashSize = std::clamp(reduceHashSize, 0.0f, 1.0f);
 
 	if (bufw <= w) {
 		// We can assume the data is contiguous.  These are the total used pixels.
@@ -573,6 +601,14 @@ u32 TextureReplacer::ComputeHash(u32 addr, int bufw, int w, int h, bool swizzled
 		// We have gaps.  Let's hash each row and sum.
 		const u32 bytesPerLine = (textureBitsPerPixel[fmt] * w) / 8 * reduceHashSize;
 		const u32 stride = (textureBitsPerPixel[fmt] * bufw) / 8;
+
+		// Same sanity check as the contiguous path above - the rows are strided, so this is the
+		// span we actually touch. Without it, a large h walks far past the end of the region.
+		const u32 sizeInRAM = h > 0 ? (h - 1) * stride + bytesPerLine : 0;
+		if (Memory::MaxSizeAtAddress(addr) < sizeInRAM) {
+			ERROR_LOG(Log::G3D, "Can't hash a %d bytes texture at %08x - end point is outside memory", sizeInRAM, addr);
+			return 0;
+		}
 
 		u32 result = 0;
 		switch (textureHash_) {
@@ -610,7 +646,7 @@ u32 TextureReplacer::ComputeHash(u32 addr, int bufw, int w, int h, bool swizzled
 
 ReplacedTexture *TextureReplacer::FindReplacement(ReplacementCacheKey replacementKey, int w, int h) {
 	// Only actually replace if we're replacing.  We might just be saving.
-	if (!Enabled() || !g_Config.bReplaceTextures) {
+	if (!replaceEnabled_) {
 		return nullptr;
 	}
 
@@ -952,7 +988,7 @@ static typename std::unordered_map<ReplacementCacheKey, Value>::const_iterator L
 }
 
 bool TextureReplacer::FindFiltering(ReplacementCacheKey replacementKey, TextureFiltering *forceFiltering) {
-	if (!Enabled() || !g_Config.bReplaceTextures) {
+	if (!replaceEnabled_) {
 		return false;
 	}
 

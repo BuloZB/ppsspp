@@ -5,7 +5,6 @@
 // Modified by xSacha
 // Reworked by hrydgard
 
-#import "AppDelegate.h"
 #import "ViewController.h"
 #import "iOSCoreAudio.h"
 
@@ -42,24 +41,17 @@
 #error Must be built with ARC, please revise the flags for ViewController.mm to include -fobjc-arc.
 #endif
 
-static std::atomic<bool> renderLoopRunning;
 static std::thread g_emuThread;
 
 PPSSPPBaseViewController *sharedViewController;
 
 @interface PPSSPPViewControllerGL () {
 	GraphicsContext *graphicsContext;
-
-	int imageRequestId;
-	NSString *imageFilename;
 }
 
 @property (nonatomic, strong) EAGLContext *glContext;
 @property (nonatomic, strong) GLKView *glView;
 @property (nonatomic, strong) CADisplayLink *displayLink;
-@property (nonatomic, assign) NSTimeInterval lastTimestamp;
-
-@property (nonatomic, strong) EAGLContext* context;
 
 @end
 
@@ -84,7 +76,10 @@ PPSSPPBaseViewController *sharedViewController;
 		return false;
 	}
 
-	g_emuThread = EmuThread_Start(graphicsContext, new NativeApplication(), [](){});
+	g_emuThread = EmuThread_Start(graphicsContext, new NativeApplication(), [](GraphicsContext *graphicsContext){
+		NativeFrame(graphicsContext);
+		return true;
+	});
 	return true;
 }
 
@@ -132,10 +127,6 @@ PPSSPPBaseViewController *sharedViewController;
 	}
 	[self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSDefaultRunLoopMode];
 
-	self.lastTimestamp = 0;
-
-	UIScreen* screen = [(AppDelegate*)[UIApplication sharedApplication].delegate screen];
-	self.view.frame = [screen bounds];
 	self.view.multipleTouchEnabled = YES;
 
 	graphicsContext = new OpenGLGraphicsContext();
@@ -160,7 +151,6 @@ PPSSPPBaseViewController *sharedViewController;
 
 	[self hideKeyboard];
 
-	// Initialize the motion manager for accelerometer control.
 	INFO_LOG(Log::G3D, "Done with viewDidLoad.");
 }
 
@@ -171,14 +161,12 @@ PPSSPPBaseViewController *sharedViewController;
 
 - (void)viewWillAppear:(BOOL)animated {
 	[super viewWillAppear:animated];
-	// Resume display link unless explicitly paused
-	INFO_LOG(Log::G3D, "viewWillAppear - resuming display link");
+	INFO_LOG(Log::G3D, "viewWillAppear");
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
 	[super viewWillDisappear:animated];
-	// stop rendering while not visible
-	INFO_LOG(Log::G3D, "viewWillDisappear - pausing display link");
+	INFO_LOG(Log::G3D, "viewWillDisappear");
 }
 
 - (void)dealloc {
@@ -203,16 +191,6 @@ PPSSPPBaseViewController *sharedViewController;
 }
 
 - (void)displayLinkFired:(CADisplayLink *)dl {
-	// compute delta time
-	NSTimeInterval timestamp = dl.timestamp;
-	NSTimeInterval delta = 0;
-	if (self.lastTimestamp > 0) {
-		delta = timestamp - self.lastTimestamp;
-	} else {
-		delta = dl.duration; // fallback
-	}
-	self.lastTimestamp = timestamp;
-
 	// Ensure context is current before drawing
 	[EAGLContext setCurrentContext:self.glContext];
 
@@ -226,7 +204,9 @@ PPSSPPBaseViewController *sharedViewController;
 		return;
 	}
 	if (sharedViewController) {
-		graphicsContext->ThreadFrame(true);
+		if (!graphicsContext->ThreadFrame()) {
+			INFO_LOG(Log::G3D, "ThreadFrame returned false");
+		}
 	}
 }
 
@@ -261,15 +241,6 @@ PPSSPPBaseViewController *sharedViewController;
 
 	_dbg_assert_(graphicsContext);
 
-	if (self.context) {
-		if ([EAGLContext currentContext] == self.context) {
-			[EAGLContext setCurrentContext:nil];
-		}
-		self.context = nil;
-	}
-
-	[[NSNotificationCenter defaultCenter] removeObserver:self];
-
 	graphicsContext->ShutdownSurface();
 	graphicsContext->ShutdownAPI();
 	delete graphicsContext;
@@ -280,10 +251,6 @@ PPSSPPBaseViewController *sharedViewController;
 - (void)bindDefaultFBO
 {
 	[(GLKView*)self.glView bindDrawable];
-}
-
-- (UIView *)getView {
-	return [self view];
 }
 
 // Can't consolidate this yet.

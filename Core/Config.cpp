@@ -234,6 +234,7 @@ static const ConfigSetting generalSettings[] = {
 	ConfigSetting("FileLogging", SETTING(g_Config, bEnableFileLogging), false, CfgFlag::PER_GAME),
 	ConfigSetting("AutoRun", SETTING(g_Config, bAutoRun), true, CfgFlag::DEFAULT),
 	ConfigSetting("IgnoreBadMemAccess", SETTING(g_Config, bIgnoreBadMemAccess), true, CfgFlag::DEFAULT),
+	ConfigSetting("EnableFPUExceptionTraps", SETTING(g_Config, bEnableFPUExceptionTraps), false, CfgFlag::DEFAULT),
 	ConfigSetting("CurrentDirectory", SETTING(g_Config, currentDirectory), "", CfgFlag::DEFAULT),
 	ConfigSetting("ShowDebuggerOnLoad", SETTING(g_Config, bShowDebuggerOnLoad), false, CfgFlag::DEFAULT),
 	ConfigSetting("ShowImDebugger", SETTING(g_Config, bShowImDebugger), false, CfgFlag::DONT_SAVE),
@@ -325,11 +326,11 @@ static const ConfigSetting generalSettings[] = {
 	// ConfigSetting("SettingsCurrentTab", SETTING(g_Config, iSettingsCurrentTab), 0, CfgFlag::DEFAULT),
 	// ConfigSetting("DeveloperSettingsCurrentTab", SETTING(g_Config, iDeveloperSettingsCurrentTab), 0, CfgFlag::DEFAULT),
 
-#if defined(USING_WIN_UI)
+#if PPSSPP_PLATFORM(WINDOWS) && !PPSSPP_PLATFORM(UWP)
 	ConfigSetting("TopMost", SETTING(g_Config, bTopMost), false, CfgFlag::DEFAULT),
 #endif
 
-#if defined(USING_WIN_UI) || (defined (SDL) && !defined(MOBILE_DEVICE))
+#if PPSSPP_PLATFORM(WINDOWS) || (defined (SDL) && !defined(MOBILE_DEVICE))
 	ConfigSetting("PauseOnLostFocus", SETTING(g_Config, bPauseOnLostFocus), false, CfgFlag::PER_GAME),
 #endif
 
@@ -414,11 +415,7 @@ static const ConfigSetting cpuSettings[] = {
 
 static int DefaultInternalResolution() {
 	// Auto on Windows and Linux, 2x on large screens and iOS, 1x elsewhere.
-#if defined(USING_WIN_UI) || defined(USING_QT_UI)
-	return 0;
-#elif PPSSPP_PLATFORM(IOS)
-	return 2;
-#else
+#if PPSSPP_PLATFORM(ANDROID)
 	if (System_GetPropertyInt(SYSPROP_DEVICE_TYPE) == DEVICE_TYPE_VR) {
 		return 4;
 	}
@@ -426,42 +423,18 @@ static int DefaultInternalResolution() {
 	int scale = longestDisplaySide >= 1000 ? 2 : 1;
 	INFO_LOG(Log::Config, "Longest display side: %d pixels. Choosing scale %d", longestDisplaySide, scale);
 	return scale;
+#elif PPSSPP_PLATFORM(IOS)
+	return 2;
+#else
+	return 0;
 #endif
 }
 
 static int DefaultFastForwardMode() {
-#if PPSSPP_PLATFORM(ANDROID) || defined(USING_QT_UI) || PPSSPP_PLATFORM(UWP) || PPSSPP_PLATFORM(IOS)
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(UWP) || PPSSPP_PLATFORM(IOS)
 	return (int)FastForwardMode::SKIP_FLIP;
 #else
 	return (int)FastForwardMode::CONTINUOUS;
-#endif
-}
-
-static int DefaultAndroidHwScale() {
-#if PPSSPP_PLATFORM(ANDROID)
-	if (System_GetPropertyInt(SYSPROP_SYSTEMVERSION) >= 19 || System_GetPropertyInt(SYSPROP_DEVICE_TYPE) == DEVICE_TYPE_TV) {
-		// Arbitrary cutoff at Kitkat - modern devices are usually powerful enough that hw scaling
-		// doesn't really help very much and mostly causes problems. See #11151
-		return 0;
-	}
-
-	// Get the real resolution as passed in during startup, not dp_xres and stuff
-	int xres = System_GetPropertyInt(SYSPROP_DISPLAY_XRES);
-	int yres = System_GetPropertyInt(SYSPROP_DISPLAY_YRES);
-
-	if (xres <= 960) {
-		// Smaller than the PSP*2, let's go native.
-		return 0;
-	} else if (xres <= 480 * 3) {  // 720p xres
-		// Small-ish screen, we should default to 2x
-		return 2 + 1;
-	} else {
-		// Large or very large screen. Default to 3x psp resolution.
-		return 3 + 1;
-	}
-	return 0;
-#else
-	return 1;
 #endif
 }
 
@@ -563,7 +536,6 @@ int Config::NextValidBackend() {
 			return (int)GPUBackend::OPENGL;
 		}
 #endif
-
 		// They've all failed.  Let them try the default - or on Android, OpenGL.
 		if (sFailedGPUBackends.find(",ALL") == std::string::npos) {
 			sFailedGPUBackends += ",ALL";
@@ -721,12 +693,13 @@ static const ConfigSetting graphicsSettings[] = {
 	ConfigSetting("SkipBufferEffects", SETTING(g_Config, bSkipBufferEffects), false, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("DepthRasterMode", SETTING(g_Config, iDepthRasterMode), &DefaultDepthRaster, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("SoftwareRenderer", SETTING(g_Config, bSoftwareRendering), false, CfgFlag::PER_GAME),
+	ConfigSetting("SoftwareDisableDithering", SETTING(g_Config, bSoftwareDisableDithering), false, CfgFlag::PER_GAME),
 	ConfigSetting("SoftwareRendererJit", SETTING(g_Config, bSoftwareRenderingJit), true, CfgFlag::PER_GAME),
 	ConfigSetting("HardwareTransform", SETTING(g_Config, bHardwareTransform), true, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("TextureFiltering", SETTING(g_Config, iTexFiltering), 1, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("Smart2DTexFiltering", SETTING(g_Config, bSmart2DTexFiltering), false, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("InternalResolution", SETTING(g_Config, iInternalResolution), &DefaultInternalResolution, CfgFlag::PER_GAME | CfgFlag::REPORT),
-	ConfigSetting("AndroidHwScale", SETTING(g_Config, iAndroidHwScale), &DefaultAndroidHwScale, CfgFlag::DEFAULT),
+	ConfigSetting("AndroidHwScale", SETTING(g_Config, iAndroidHwScale), 0, CfgFlag::DEFAULT),
 	ConfigSetting("HighQualityDepth", SETTING(g_Config, bHighQualityDepth), true, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("FrameSkip", SETTING(g_Config, iFrameSkip), 0, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("AutoFrameSkip", SETTING(g_Config, bAutoFrameSkip), IsVREnabled(), CfgFlag::PER_GAME | CfgFlag::REPORT),
@@ -735,7 +708,7 @@ static const ConfigSetting graphicsSettings[] = {
 	ConfigSetting("FrameRate", SETTING(g_Config, iFpsLimit1), 0, CfgFlag::PER_GAME),
 	ConfigSetting("FrameRate2", SETTING(g_Config, iFpsLimit2), -1, CfgFlag::PER_GAME),
 	ConfigSetting("AnalogFrameRate", SETTING(g_Config, iAnalogFpsLimit), 240, CfgFlag::PER_GAME),
-#if defined(USING_WIN_UI)
+#if PPSSPP_PLATFORM(WINDOWS)
 	ConfigSetting("RestartRequired", SETTING(g_Config, bRestartRequired), false, CfgFlag::DONT_SAVE),
 #endif
 
@@ -974,7 +947,7 @@ static const ConfigSetting touchControlSettings[] = {
 static const ConfigSetting controlSettings[] = {
 	ConfigSetting("HapticFeedback", SETTING(g_Config, bHapticFeedback), false, CfgFlag::PER_GAME),
 	
-#if defined(USING_WIN_UI)
+#if PPSSPP_PLATFORM(WINDOWS)
 	ConfigSetting("IgnoreWindowsKey", SETTING(g_Config, bIgnoreWindowsKey), false, CfgFlag::PER_GAME),
 #endif
 
@@ -1105,9 +1078,7 @@ static const ConfigSetting systemParamSettings[] = {
 	ConfigSetting("ButtonPreference", SETTING(g_Config, iButtonPreference), PSP_SYSTEMPARAM_BUTTON_CROSS, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("LockParentalLevel", SETTING(g_Config, iLockParentalLevel), 0, CfgFlag::PER_GAME),
 	ConfigSetting("WlanAdhocChannel", SETTING(g_Config, iWlanAdhocChannel), PSP_SYSTEMPARAM_ADHOC_CHANNEL_AUTOMATIC, CfgFlag::PER_GAME),
-#if defined(USING_WIN_UI) || defined(USING_QT_UI) || PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(SWITCH)
 	ConfigSetting("BypassOSKWithKeyboard", SETTING(g_Config, bBypassOSKWithKeyboard), false, CfgFlag::PER_GAME),
-#endif
 	ConfigSetting("WlanPowerSave", SETTING(g_Config, bWlanPowerSave), (bool) PSP_SYSTEMPARAM_WLAN_POWERSAVE_OFF, CfgFlag::PER_GAME),
 	ConfigSetting("EncryptSave", SETTING(g_Config, bEncryptSave), true, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("MemStickSize", SETTING(g_Config, iMemStickSizeGB), 16, CfgFlag::DEFAULT),
@@ -1135,6 +1106,7 @@ static const ConfigSetting debuggerSettings[] = {
 	ConfigSetting("FuncHashMap", SETTING(g_Config, bFuncHashMap), false, CfgFlag::DEFAULT),
 	ConfigSetting("SkipFuncHashMap", SETTING(g_Config, sSkipFuncHashMap), "", CfgFlag::DEFAULT),
 	ConfigSetting("MemInfoDetailed", SETTING(g_Config, bDebugMemInfoDetailed), false, CfgFlag::DEFAULT),
+	ConfigSetting("AutoSaveLoadSymbols", SETTING(g_Config, bAutoSaveLoadSymbols), false, CfgFlag::DEFAULT),
 };
 
 static const ConfigSetting jitSettings[] = {
@@ -1410,7 +1382,14 @@ void Config::Load(const char *iniFileName, const char *controllerIniFilename) {
 	// Load post process shader values
 	mPostShaderSetting.clear();
 	for (const auto &[key, value] : postShaderSetting->ToMap()) {
-		mPostShaderSetting[key] = std::stof(value);
+		// The ini is user-editable, and std::stof throws - which would take the process down
+		// during startup config load. LoadGameConfig already parses this section this way.
+		float f = 0.0f;
+		if (sscanf(value.c_str(), "%f", &f) == 1) {
+			mPostShaderSetting[key] = f;
+		} else {
+			WARN_LOG(Log::Config, "Invalid float value string for param %s: '%s'", key.c_str(), value.c_str());
+		}
 	}
 
 	const Section *hostOverrideSetting = iniFile.GetOrCreateSection("HostAliases");
@@ -1493,7 +1472,7 @@ bool Config::Save(const char *saveReason) {
 				}
 				if (!ShouldSaveSetting(meta.settings[j].GetVoidPtr(configBlock))) {
 					// Skip settings marked as "don't save".
-					INFO_LOG(Log::Config, "Not saving setting '%.*s' as marked as don't save.", STR_VIEW(meta.settings[j].IniKey()));
+					DEBUG_LOG(Log::Config, "Not saving setting '%.*s' as marked as don't save.", STR_VIEW(meta.settings[j].IniKey()));
 					continue;
 				}
 				meta.settings[j].WriteToIniSection(configBlock, section);
@@ -1579,7 +1558,7 @@ void Config::PostLoadCleanup() {
 	// Override ppsspp.ini JIT value to prevent crashing
 	jitForcedOff = DefaultCpuCore() != (int)CPUCore::JIT && (g_Config.iCpuCore == (int)CPUCore::JIT || g_Config.iCpuCore == (int)CPUCore::JIT_IR);
 	if (jitForcedOff) {
-		g_Config.iCpuCore = (int)CPUCore::IR_INTERPRETER;
+		iCpuCore = (int)CPUCore::IR_INTERPRETER;
 	}
 
 	// This caps the aniso level exponent to 4 (so 16x.). No hardware supports more anyway.
@@ -1596,18 +1575,23 @@ void Config::PostLoadCleanup() {
 	iGPUBackend = (int)GPUBackend::DIRECT3D11;
 #endif
 
+	if (!IsBackendEnabled((GPUBackend)iGPUBackend)) {
+		ERROR_LOG(Log::G3D, "Backend %d not enabled - switching to platform default", iGPUBackend);
+		iGPUBackend = (int)DefaultGPUBackend();
+	}
+
 	// Set a default MAC, and correct if it's an old format.
 	if (sMACAddress.length() != 17)
 		sMACAddress = CreateRandMAC();
 
-	if (g_Config.bAutoFrameSkip && g_Config.bSkipBufferEffects) {
-		g_Config.bSkipBufferEffects = false;
+	if (bAutoFrameSkip && bSkipBufferEffects) {
+		bSkipBufferEffects = false;
 	}
 
 	// Automatically silence secondary instances. Could be an option I guess, but meh.
 	if (PPSSPP_ID > 1) {
 		NOTICE_LOG(Log::Audio, "Secondary instance %d - silencing audio", (int)PPSSPP_ID);
-		g_Config.iGameVolume = 0;
+		iGameVolume = 0;
 	}
 
 	// Automatically switch away from deprecated setting value.
@@ -1616,17 +1600,17 @@ void Config::PostLoadCleanup() {
 	}
 
 	// Remove a legacy value.
-	if (g_Config.sCustomDriver == "Default") {
-		g_Config.sCustomDriver.clear();
+	if (sCustomDriver == "Default") {
+		sCustomDriver.clear();
 	}
 
 	// Squash unsupported screen rotations.
-	if (g_Config.iScreenRotation == ROTATION_LOCKED_VERTICAL180) {
-		g_Config.iScreenRotation = ROTATION_LOCKED_VERTICAL;
+	if (iScreenRotation == ROTATION_LOCKED_VERTICAL180) {
+		iScreenRotation = ROTATION_LOCKED_VERTICAL;
 	}
 
 	// Clamp save state slot count to somewhat sane limits.
-	g_Config.iSaveStateSlotCount = std::clamp(g_Config.iSaveStateSlotCount, 1, 100);
+	iSaveStateSlotCount = std::clamp(iSaveStateSlotCount, 1, 100);
 }
 
 void Config::PreSaveCleanup() {
@@ -1978,7 +1962,12 @@ void Config::UnloadGameConfig() {
 	auto postShaderSetting = iniFile.GetOrCreateSection("PostShaderSetting")->ToMap();
 	mPostShaderSetting.clear();
 	for (const auto &[k, v] : postShaderSetting) {
-		mPostShaderSetting[k] = std::stof(v);
+		float f = 0.0f;
+		if (sscanf(v.c_str(), "%f", &f) == 1) {
+			mPostShaderSetting[k] = f;
+		} else {
+			WARN_LOG(Log::Config, "Invalid float value string for param %s: '%s'", k.c_str(), v.c_str());
+		}
 	}
 
 	auto postShaderChain = iniFile.GetOrCreateSection("PostShaderList")->ToMap();

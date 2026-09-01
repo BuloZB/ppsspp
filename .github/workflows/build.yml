@@ -136,6 +136,52 @@ jobs:
       working-directory: ${{ env.GITHUB_WORKSPACE }}
       run: msbuild /m /p:TrackFileAccess=false /p:Configuration=${{ env.BUILD_CONFIGURATION }} /p:Platform=x64 /p:AppxPackageSigningEnabled=false UWP/PPSSPP_UWP.sln
 
+  # Mirrors the two Windows jobs in libretro's own GitLab CI (see .gitlab-ci.yml). The libretro core
+  # is built by GNU make driving cl.exe/link.exe from an MSYS2 shell, not by the VS solution, so it
+  # catches MSVC-specific errors that neither build-windows nor the Linux/Android libretro builds do
+  # - duplicate symbols in particular, since MSVC emits inline functions that gcc/clang inline away.
+  build-libretro-windows:
+    name: build-libretro-windows (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - arch: x64
+          platform: windows_msvc2019_desktop_x64
+          msystem: MINGW64
+        - arch: x86
+          platform: windows_msvc2019_desktop_x86
+          msystem: MINGW32
+
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        submodules: recursive
+
+    # Needs a real MSYS2 (make, bash, cygpath) - the one preinstalled on the runner image isn't on
+    # PATH and has no make. path-type: inherit keeps the Windows PATH, which the Makefile needs for
+    # reg.exe (Windows SDK lookup) and git.
+    - name: Setup MSYS2
+      uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+      with:
+        msystem: ${{ matrix.msystem }}
+        path-type: inherit
+        install: make
+
+    # The Makefile can locate Visual Studio by itself, but only through "cmd //c bash VSWhere.sh",
+    # which depends on COMSPEC and ProgramFiles(x86) surviving into the MSYS2 shell. Resolving it
+    # here and passing VsInstallRoot= on the command line (a command-line variable overrides the
+    # Makefile's own := assignment) fails loudly rather than silently misconfiguring the build.
+    - name: Build libretro core
+      shell: msys2 {0}
+      run: |
+        VS_PATH=$(sh libretro/VSWhere.sh -latest -property installationPath)
+        test -n "$VS_PATH" || { echo "vswhere found no Visual Studio installation"; exit 1; }
+        echo "Visual Studio: $VS_PATH"
+        make -C libretro -f Makefile -j4 platform=${{ matrix.platform }} VsInstallRoot="$(cygpath -u "$VS_PATH")"
+
   test-windows:
     runs-on: windows-latest
     needs: build-windows
@@ -214,12 +260,6 @@ jobs:
           id: android-libretro
 
         - os: ubuntu-26.04
-          extra: qt
-          cc: gcc
-          cxx: g++
-          args: ./b.sh --qt
-          id: qt
-        - os: ubuntu-26.04
           extra: libretro
           cc: gcc
           cxx: g++
@@ -269,14 +309,6 @@ jobs:
       # This is required for git describe --always to work for git-version.cpp.
       run: |
         git fetch --deepen=15000 --no-recurse-submodules --tags || exit 0
-
-    - name: Install Qt
-      uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4.3.1
-      if: matrix.extra == 'qt'
-      with:
-        cache: true
-        version: 5.15.2
-        setup-python: false
 
     - name: Setup Android NDK
       uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
@@ -437,7 +469,7 @@ jobs:
     - name: Fetch tests
       working-directory: ${{ env.GITHUB_WORKSPACE }}
       # Doing this to avoid ffmpeg and other large submodules.
-      run: git submodule update --init pspautotests
+      run: git submodule update --init pspautotests frametests
 
     - name: Install Linux dependencies
       if: runner.os == 'Linux'
@@ -471,6 +503,18 @@ jobs:
     - name: Execute headless tests
       working-directory: ${{ env.GITHUB_WORKSPACE }}
       run: python test.py -g --graphics=software
+
+    - name: Execute frametests
+      if: runner.os == 'Linux'
+      working-directory: ${{ env.GITHUB_WORKSPACE }}
+      run: python3 frametests.py frametests/frametests.json --out-mode=failures
+
+    - name: Upload frametest report
+      uses: actions/upload-artifact@v7
+      if: runner.os == 'Linux' && always()
+      with:
+        name: frametest-report
+        path: frametests/out/
 
   test-headless-alpine:
     runs-on: ubuntu-latest

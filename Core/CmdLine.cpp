@@ -1,5 +1,11 @@
+#include <algorithm>
+#include <cstdlib>
+
 #include "Core/Config.h"
 #include "Core/CmdLine.h"
+#include "Core/WebServer.h"
+#include "Core/Util/PathUtil.h"
+#include "Common/File/FileUtil.h"
 #include "Common/StringUtils.h"
 #include "Common/Log/LogManager.h"
 
@@ -171,17 +177,28 @@ static const CommandLineParam g_autoParams[] = {
 	{POFF(escapeExit), CmdParamType::Bool, "escape-exit", '\0', "Escape key exits the application", CmdLineMode::Application},
 	{POFF(pauseMenuExit), CmdParamType::Bool, "pause-menu-exit", '\0', "Change \"Exit to menu\" in pause menu to \"Exit\"", CmdLineMode::Application},
 	{POFF(appendConfig), CmdParamType::String, "appendconfig", '\0', "Merge config FILE into the current configuration"},
-	{POFF(root), CmdParamType::String, "root", 'r', "Mount root directory"},
+	{POFF(root), CmdParamType::String, "root", 'r', "Mount directory as the root of host0:/."},
+	{POFF(memStick), CmdParamType::String, "memstick", '\0', "Memory stick root directory (contains PSP/GAME etc)"},
 	{POFF(stateToLoad), CmdParamType::String, "state", '\0', "Load state from specified file"},
 	{POFF(compare), CmdParamType::Bool, "compare", 'c', "Enable comparison mode", CmdLineMode::Headless},
 	{POFF(bench), CmdParamType::Bool, "bench", 'b', "Enable benchmark mode", CmdLineMode::Headless},
 	{POFF(oldAtrac), CmdParamType::Bool, "old-atrac", '\0', "Use old ATRAC decoder"},
-	{POFF(log), CmdParamType::String, "log", '\0', "Output log to FILE"},
-	{POFF(screenshotFilename), CmdParamType::String, "screenshot", '\0', "Take a screenshot and save to FILE"},
-	{POFF(screenshotFilenameSave), CmdParamType::String, "screenshot-save", '\0', "Save screenshot to specified path"},
-	{POFF(timeout), CmdParamType::Double, "timeout", '\0', "Set the timeout value"},
+	{POFF(log), CmdParamType::String, "log", '\0', "Output log to FILE", CmdLineMode::Application},
+	{POFF(enableLogging), CmdParamType::Bool, "log", '\0', "Full log output, not just emulated printfs", CmdLineMode::Headless},
+	{POFF(screenshotFilename), CmdParamType::String, "screenshot", '\0', "Compare rendered output against a reference screenshot FILE", CmdLineMode::Headless},
+	{POFF(screenshotFilenameSave), CmdParamType::String, "screenshot-save", '\0', "Save rendered screenshot to specified path (PNG if the path ends in .png, BMP otherwise)", CmdLineMode::Headless},
+	{POFF(screenshotFilenameDiff), CmdParamType::String, "screenshot-diff", '\0', "Save a visual comparison image to FILE when comparing screenshots", CmdLineMode::Headless},
+	{POFF(screenshotSaveKeepAlpha), CmdParamType::Bool, "screenshot-keep-alpha", '\0', "Preserve the alpha channel when saving PNG screenshots (default: alpha is forced to 255)", CmdLineMode::Headless},
+	{POFF(timeout), CmdParamType::Double, "timeout", '\0', "Set the timeout value", CmdLineMode::Headless},
+	{POFF(maxScreenshotError), CmdParamType::Double, "max-mse", '\0', "Maximum allowed MSE error for screenshot comparison", CmdLineMode::Headless},
+	{POFF(mountIso), CmdParamType::String, "mount", 'm', "Mount ISO/CSO on umd1:", CmdLineMode::Headless},
+	{POFF(unpackUpdater), CmdParamType::String, "unpack-updater", '\0', "Unpack the firmware in an updater EBOOT.PBP into DIR and exit", CmdLineMode::Headless},
+	{POFF(unpackUpdaterModel), CmdParamType::String, "unpack-updater-model", '\0', "PSP model to unpack for (01g..12g, default any)", CmdLineMode::Headless},
+	{POFF(odsLog), CmdParamType::Bool, "odslog", 'o', "Also log through OutputDebugString (Windows)", CmdLineMode::Headless},
+	{POFF(generateInterpreterDispatch), CmdParamType::Bool, "generate-interpreter-dispatch", '\0', "Generate C++ interpreter dispatch code (ExecInstruction) to stdout and exit", CmdLineMode::Headless},
 	{POFF(resolutionScale), CmdParamType::Int, "resolution-scale", '\0', "Set the resolution scale factor"},
 	{POFF(debuggerPort), CmdParamType::Int, "debugger", '\0', "Enable the WebSocket debugger on this port (0 = pick automatically); see docs/WebSocketDebugger.md"},
+	{POFF(autoSaveLoadSymbols), CmdParamType::Bool, "auto-save-load-symbols", '\0', "Auto save/load per-module and per-game symbol files (see bAutoSaveLoadSymbols)", CmdLineMode::Both},
 	{POFF(bootVSH), CmdParamType::Bool, "vsh", '\0', "Boot the VSH (requires files dumped from a PSP in the flash0 directory)"},
 	{POFF(memReadAction), CmdParamType::Enum, "memread", '\0', "Set the action for memory read exceptions", CmdLineMode::Both, g_ExceptionActionValues, ARRAY_SIZE(g_ExceptionActionValues)},
 	{POFF(memWriteAction), CmdParamType::Enum, "memwrite", '\0', "Set the action for memory write exceptions", CmdLineMode::Both, g_ExceptionActionValues, ARRAY_SIZE(g_ExceptionActionValues)},
@@ -189,6 +206,10 @@ static const CommandLineParam g_autoParams[] = {
 	{POFF(logNativeCrashes), CmdParamType::Bool, "log-native-crashes", '\0', "Log a native stack trace (Windows only) on an otherwise-unhandled crash", CmdLineMode::Both},
 	{POFF(verbose), CmdParamType::Bool, "verbose", '\0', "Enable verbose output", CmdLineMode::Both},
 	{POFF(printEqualLines), CmdParamType::Bool, "print-equal-lines", '\0', "Print lines that are equal during comparison", CmdLineMode::Headless},
+	{POFF(xres), CmdParamType::Int, "xres", '\0', "Set X resolution", CmdLineMode::Application},
+	{POFF(yres), CmdParamType::Int, "yres", '\0', "Set Y resolution", CmdLineMode::Application},
+	{POFF(dpi), CmdParamType::Double, "dpi", '\0', "Set DPI", CmdLineMode::Application},
+	{POFF(scale), CmdParamType::Double, "scale", '\0', "Set scale", CmdLineMode::Application},
 	// TODO: At some point we should maybe simply expose all config settings to be set directly from the command line automatically?
 };
 
@@ -229,9 +250,12 @@ int CommandLineOptions::PrintUsage(const char *progname, const char *situationTe
 	PRINT_STDOUT("  -d                    set the log level to debug\n");
 	PRINT_STDOUT("  -v                    set the log level to verbose\n");
 	PRINT_STDOUT("  --loglevel=INTEGER    set the log level to specified value\n");
-	PRINT_STDOUT("  --log=FILE            output log to FILE\n");
+	if (mode == CmdLineMode::Application) {
+		PRINT_STDOUT("  --log=FILE        output log to FILE\n");
+	}
 	PRINT_STDOUT("  --state=FILE          load state from FILE\n");
 
+	PRINT_STDOUT("  --cpu=CPU             use the specified CPU core (interpreter, ir, jit, jit-ir)\n");
 	PRINT_STDOUT("  -i                    use the interpreter\n");
 	PRINT_STDOUT("  -r                    use IR interpreter\n");
 	PRINT_STDOUT("  -j                    use JIT\n");
@@ -242,12 +266,15 @@ int CommandLineOptions::PrintUsage(const char *progname, const char *situationTe
 			// Skip mode-irrelevant parameters in help.
 			continue;
 		}
-		char key[25]{};
+		char key[64]{};
 		snprintf(key, ARRAY_SIZE(key), "  --%s%s%s", param.longName,
 			param.shortName ? ", -" : "",
 			param.shortName ? std::string(1, param.shortName).c_str() : "");
-		// Fill key with spacing.
-		for (size_t j = strlen(key); j < ARRAY_SIZE(key) - 1; ++j) {
+		// Fill key with spacing, keeping at least one space before the doc string
+		// even if the name itself ran past the normal column width.
+		size_t padTo = std::max(strlen(key) + 1, (size_t)24);
+		padTo = std::min(padTo, ARRAY_SIZE(key) - 1);
+		for (size_t j = strlen(key); j < padTo; ++j) {
 			key[j] = ' ';
 		}
 		if (param.type == CmdParamType::Enum) {
@@ -262,13 +289,10 @@ int CommandLineOptions::PrintUsage(const char *progname, const char *situationTe
 		}
 	}
 
-	// These are only available in SDL.
-	if (mode == CmdLineMode::Application) {
-		PRINT_STDOUT("  --xres PIXELS         set X resolution\n");
-		PRINT_STDOUT("  --yres PIXELS         set Y resolution\n");
-		PRINT_STDOUT("  --dpi DPI             set DPI\n");
-		PRINT_STDOUT("  --scale FACTOR        set scale\n");
+	if (mode == CmdLineMode::Headless) {
+		PRINT_STDOUT("  --ignore TESTNAME     ignore the specified test (may be repeated)\n");
 	}
+
 	PRINT_STDOUT("  --graphics=BACKEND    use a different gpu backend\n");
 	PRINT_STDOUT("                        options: gles, software, etc. (also opengl3.1, etc.)\n");
 	return 0;
@@ -279,13 +303,11 @@ int CommandLineOptions::PrintUsage(const char *progname, const char *situationTe
 // Actually might want to reconsider given Android...
 CommandLineParseResult CommandLineOptions::Parse(int argc, const char *argv[], CmdLineMode mode) {
 	this->mode = mode;
+	constexpr std::string_view cpuBackendStr = "--cpu=";
 	constexpr std::string_view gpuBackendStr = "--graphics=";
 	constexpr std::string_view configOption = "--config=";
 	constexpr std::string_view controlsOption = "--controlconfig=";
-
-#ifdef _DEBUG
-	enableLogging = true;
-#endif
+	constexpr std::string_view logLevelOption = "--loglevel=";
 
 	// The rest is handled in NativeInit().
 	// NOTE: We don't increment i here, as we'll sometimes handle options that read the next argument.
@@ -396,23 +418,56 @@ CommandLineParseResult CommandLineOptions::Parse(int argc, const char *argv[], C
 				gpuBackend = GPUBackend::OPENGL;
 				softwareRendering = true;
 			} else if (sscanf(restOfOption.c_str(), "gles%lg", &glVersionTemp) == 1 || sscanf(restOfOption.c_str(), "opengl%lg", &glVersionTemp) == 1) {
-				g_Config.iGPUBackend = (int)GPUBackend::OPENGL;
-				g_Config.bSoftwareRendering = false;
+				gpuBackend = GPUBackend::OPENGL;
+				softwareRendering = false;
 				force_gl_version = int(10.0 * glVersionTemp + 0.5);
-			} else if (restOfOption == "gles") {
+			} else if (restOfOption == "gles" || restOfOption == "opengl") {
 				gpuBackend = GPUBackend::OPENGL;
 				softwareRendering = false;
 			} else {
 				// Bad value, report error and exit.
 				PRINT_STDERR("Invalid value for --graphics=: %s", restOfOption.c_str());
-				return CommandLineParseResult::Exit;
+				return CommandLineParseResult::Error;
+			}
+		} else if (startsWith(argv[i], cpuBackendStr)) {
+			const std::string restOfOption = argv[i] + cpuBackendStr.size();
+			// Force software rendering off, as picking gles implies HW acceleration.
+			// We could add more options for software such as "software-gles",
+			// "software-vulkan" and "software-d3d11", or something similar.
+			// For now, software rendering force-activates OpenGL.
+			double glVersionTemp = 0.0f;
+			if (restOfOption == "interpreter") {
+				cpuCore = CPUCore::INTERPRETER;
+			} else if (restOfOption == "jit") {
+				cpuCore = CPUCore::JIT;
+			} else if (restOfOption == "jit-ir") {
+				cpuCore = CPUCore::JIT_IR;
+			} else if (restOfOption == "ir") {
+				cpuCore = CPUCore::IR_INTERPRETER;
+			} else {
+				// Bad value, report error and exit.
+				PRINT_STDERR("Invalid value for --cpu=: %s", restOfOption.c_str());
+				return CommandLineParseResult::Error;
 			}
 		} else if (startsWith(argv[i], configOption)) {
 			configFilename = std::string(argv[i] + configOption.size());
 		} else if (startsWith(argv[i], controlsOption)) {
 			controlsConfigFilename = std::string(argv[i] + controlsOption.size());
-		} else {
-			// Report unknown argument later once this is complete.
+		} else if (startsWith(argv[i], logLevelOption)) {
+			logLevel = static_cast<LogLevel>(atoi(argv[i] + logLevelOption.size()));
+		} else if (equals(argv[i], "--ignore")) {
+			// Headless: skip a specific test. Can be repeated, so not a regular auto-param.
+			if (i + 1 < argc) {
+				ignoredTests.emplace_back(argv[i + 1]);
+				i += 2;
+				continue;
+			} else {
+				PRINT_STDERR("Error: --ignore requires an argument.\n");
+				return CommandLineParseResult::Error;
+			}
+		} else if (startsWith(argv[i], "--")) {
+			PRINT_STDERR("Error: Unknown parameter: %s\n", argv[i]);
+			return CommandLineParseResult::Error;
 		}
 		// To the next argument.
 		i++;
@@ -436,6 +491,9 @@ void CommandLineOptions::ApplyToConfig() const {
 		g_Config.iGPUBackend = (int)gpuBackend.value();
 		g_Config.DoNotSaveSetting(&g_Config.iGPUBackend);
 	}
+	if (cpuCore.has_value()) {
+		g_Config.iCpuCore = (int)cpuCore.value();
+	}
 	if (softwareRendering.has_value()) {
 		g_Config.bSoftwareRendering = softwareRendering.value();
 		g_Config.DoNotSaveSetting(&g_Config.bSoftwareRendering);
@@ -448,21 +506,25 @@ void CommandLineOptions::ApplyToConfig() const {
 		g_Config.bAutoRun = false;
 		g_Config.bSaveSettings = false;
 	}
-	if (cpuCore.has_value()) {
-		g_Config.iCpuCore = (int)cpuCore.value();
-	}
 	if (escapeExit.has_value()) {
 		g_Config.bPauseExitsEmulator = escapeExit.value();
 	}
 	if (pauseMenuExit.has_value()) {
 		g_Config.bPauseMenuExitsEmulator = pauseMenuExit.value();
 	}
-
 	if (debuggerPort.has_value()) {
 		g_Config.iRemoteISOPort = debuggerPort.value();
 		g_Config.DoNotSaveSetting(&g_Config.iRemoteISOPort);
 		g_Config.bRemoteDebuggerOnStartup = true;
 		g_Config.DoNotSaveSetting(&g_Config.bRemoteDebuggerOnStartup);
+		// --debugger=0 still means "pick any free port", but a specific port was asked for by
+		// something that intends to connect to it, so don't quietly come up on a different one.
+		WebServerSetRequireExactPort(debuggerPort.value() != 0);
+	}
+
+	if (autoSaveLoadSymbols.has_value()) {
+		g_Config.bAutoSaveLoadSymbols = autoSaveLoadSymbols.value();
+		g_Config.DoNotSaveSetting(&g_Config.bAutoSaveLoadSymbols);
 	}
 
 	if (logLevel.has_value()) {
@@ -475,8 +537,23 @@ void CommandLineOptions::ApplyToConfig() const {
 	}
 
 	if (root.has_value()) {
-		g_Config.DoNotSaveSetting(&g_Config.mountRoot);
+		// No DoNotSaveSetting() here - mountRoot isn't an ordinary setting and never gets
+		// written to ppsspp.ini, since the ini itself lives inside the memory stick directory.
 		g_Config.mountRoot = Path(root.value());
+	}
+
+	if (memStick.has_value()) {
+		// No DoNotSaveSetting() here - memStickDirectory isn't an ordinary setting and never gets
+		// written to ppsspp.ini, since the ini itself lives inside the memory stick directory.
+		g_Config.memStickDirectory = Path(memStick.value());
+		File::CreateFullPath(g_Config.memStickDirectory);
+		CreateSysDirectories();
+	}
+
+	if (nand.has_value()) {
+		// No DoNotSaveSetting() here - memStickDirectory isn't an ordinary setting and never gets
+		// written to ppsspp.ini, since the ini itself lives inside the memory stick directory.
+		g_Config.nandRootDirectory = Path(nand.value());
 	}
 
 	if (resolutionScale.has_value()) {

@@ -34,6 +34,7 @@
 #include "Common/System/OSD.h"
 #include "Common/System/Request.h"
 #include "Common/System/NativeApp.h"
+#include "Common/UI/ScreenManager.h"
 #include "Core/Config.h"
 #include "Core/Reporting.h"
 #include "Core/System.h"
@@ -65,7 +66,7 @@ void copyDeepLinkForPath(std::string_view filePath);
 void copyDeepLinkForPath(std::string_view) {}
 #endif
 
-constexpr GameInfoFlags g_desiredFlags = GameInfoFlags::PARAM_SFO | GameInfoFlags::ICON | GameInfoFlags::PIC0 | GameInfoFlags::PIC1 | GameInfoFlags::ICON1_PMF | GameInfoFlags::UNCOMPRESSED_SIZE | GameInfoFlags::SIZE | GameInfoFlags::SAVEDATA_SIZE;
+constexpr GameInfoFlags g_desiredFlags = GameInfoFlags::PARAM_SFO | GameInfoFlags::ICON | GameInfoFlags::PIC0 | GameInfoFlags::PIC1 | GameInfoFlags::ICON1_PMF | GameInfoFlags::UNCOMPRESSED_SIZE | GameInfoFlags::SIZE | GameInfoFlags::SAVEDATA_SIZE | GameInfoFlags::BUNDLED_UPDATE_INFO;
 
 class PMFView : public UI::InertView {
 public:
@@ -329,12 +330,12 @@ void GameScreen::CreateContentViews(UI::ViewGroup *parent) {
 	std::string title = info_->GetTitle();
 
 	if (knownFlags_ & GameInfoFlags::PARAM_SFO) {
+		TextView* tvTitle = mainGameInfo->Add(new TextView(title, ALIGN_LEFT | FLAG_WRAP_TEXT, false, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT)));
+		tvTitle->SetShadow(true);
+
 		std::string regionID = ReplaceAll(info_->id_version, "_", " v");
 		if (!regionID.empty()) {
 			regionID += ": ";
-
-			TextView *tvTitle = mainGameInfo->Add(new TextView(title, ALIGN_LEFT | FLAG_WRAP_TEXT, false, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT)));
-			tvTitle->SetShadow(true);
 		}
 
 		if (info_->region != GameRegion::UNKNOWN) {
@@ -384,6 +385,15 @@ void GameScreen::CreateContentViews(UI::ViewGroup *parent) {
 		}
 		TextView *tvGameSize = mainGameInfo->Add(new TextView(temp, ALIGN_LEFT, true, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT)));
 		tvGameSize->SetShadow(true);
+	}
+
+	// Most game discs carry a firmware updater, which holds files we'd like to have, like the fonts.
+	if ((knownFlags_ & GameInfoFlags::BUNDLED_UPDATE_INFO) && info_->bundledUpdate.present) {
+		char temp[256];
+		snprintf(temp, sizeof(temp), "%s: %s, %s", ga->T_cstr("Firmware update on disc"),
+			info_->bundledUpdate.Describe().c_str(), NiceSizeFormat(info_->bundledUpdate.archiveSize).c_str());
+		TextView *tvUpdate = mainGameInfo->Add(new TextView(temp, ALIGN_LEFT, true, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT)));
+		tvUpdate->SetShadow(true);
 	}
 
 	if ((knownFlags_ & GameInfoFlags::SAVEDATA_SIZE)) {

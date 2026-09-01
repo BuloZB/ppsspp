@@ -184,6 +184,10 @@ bool ZipCanExtractWithoutOverwrite(struct zip *z, const Path &destination, int s
 	}
 	for (int i = 0; i < numFiles; i++) {
 		const char *fn = zip_get_name(z, i, 0);
+		if (!fn) {
+			// zip_get_name() returns NULL on a corrupted central directory entry.
+			continue;
+		}
 		if (endsWith(fn, "/")) {
 			// we don't care about directory overwrites, that's fine.
 			continue;
@@ -199,11 +203,18 @@ bool ZipCanExtractWithoutOverwrite(struct zip *z, const Path &destination, int s
 
 static std::string ZipReadFileByIndex(struct zip *z, int file_index) {
 	struct zip_stat zstat;
-	zip_stat_index(z, file_index, 0, &zstat);
+	zip_stat_init(&zstat);
+	if (zip_stat_index(z, file_index, 0, &zstat) != 0) {
+		return {};
+	}
 	std::string buffer;
 	buffer.resize(zstat.size);
 	zip_file *zf = zip_fopen_index(z, file_index, 0);
+	if (!zf) {
+		return {};
+	}
 	if (zip_fread(zf, &buffer[0], buffer.size()) != (zip_int64_t)zstat.size) {
+		zip_fclose(zf);
 		return {};
 	}
 	zip_fclose(zf);
@@ -446,7 +457,11 @@ bool GameManager::DetectTexturePackDest(struct zip *z, int iniIndex, Path &dest)
 	auto iz = GetI18NCategory(I18NCat::INSTALLZIP);
 
 	struct zip_stat zstat;
-	zip_stat_index(z, iniIndex, 0, &zstat);
+	zip_stat_init(&zstat);
+	if (zip_stat_index(z, iniIndex, 0, &zstat) != 0) {
+		SetInstallError(iz->T("Zip archive corrupt"));
+		return false;
+	}
 
 	if (zstat.size >= 32 * 1024 * 1024) {
 		SetInstallError(iz->T("Texture pack doesn't support install"));
@@ -562,9 +577,13 @@ std::string GameManager::GetISOGameID(FileLoader *loader) const {
 	return sfo.GetValueString("DISC_ID");
 }
 
-bool GameManager::ExtractFile(struct zip *z, int file_index, const Path &outFilename, size_t *bytesCopied, size_t allBytes, size_t maxTotalSize) {
+bool GameManager::ExtractFile(struct zip *z, int file_index, const Path &outFilename, int64_t *bytesCopied, int64_t allBytes, int64_t maxTotalSize) {
 	struct zip_stat zstat;
-	zip_stat_index(z, file_index, 0, &zstat);
+	zip_stat_init(&zstat);
+	if (zip_stat_index(z, file_index, 0, &zstat) != 0) {
+		ERROR_LOG(Log::HLE, "Failed to stat file by index (%d) (%s)", file_index, outFilename.c_str());
+		return false;
+	}
 	size_t size = zstat.size;
 	zip_file *zf = zip_fopen_index(z, file_index, 0);
 	if (!zf) {
@@ -635,9 +654,9 @@ bool GameManager::ExtractFile(struct zip *z, int file_index, const Path &outFile
 }
 
 // Doesn't care what it is, just extracts the whole ZIP to the requested location.
-bool GameManager::ExtractZipContents(struct zip *z, const Path &dest, const ZipFileInfo &info, bool allowRoot, size_t maxTotalSize) {
-	size_t allBytes = 0;
-	size_t bytesCopied = 0;
+bool GameManager::ExtractZipContents(struct zip *z, const Path &dest, const ZipFileInfo &info, bool allowRoot, int64_t maxTotalSize) {
+	int64_t allBytes = 0;
+	int64_t bytesCopied = 0;
 
 	auto sy = GetI18NCategory(I18NCat::SYSTEM);
 
@@ -673,6 +692,10 @@ bool GameManager::ExtractZipContents(struct zip *z, const Path &dest, const ZipF
 	for (int i = 0; i < info.numFiles; i++) {
 		// Let's count the directories as the first 10%.
 		const char *fn = zip_get_name(z, i, 0);
+		if (!fn) {
+			// zip_get_name() returns NULL on a corrupted central directory entry.
+			continue;
+		}
 		std::string zippedName = fn;
 		if (zippedName.length() < (size_t)info.stripChars) {
 			continue;
@@ -701,12 +724,12 @@ bool GameManager::ExtractZipContents(struct zip *z, const Path &dest, const ZipF
 			if (zip_stat_index(z, i, 0, &zstat) >= 0) {
 				// Guard against zip bombs: the total declared size must not
 				// exceed the limit. Check before adding to avoid overflow.
-				if (zstat.size > maxTotalSize || allBytes > maxTotalSize - zstat.size) {
+				if ((int64_t)zstat.size > maxTotalSize || allBytes > maxTotalSize - (int64_t)zstat.size) {
 					ERROR_LOG(Log::HLE, "Bailing: zip contents too large (%d bytes), limit %d", (int)allBytes, (int)maxTotalSize);
 					SetInstallError(sy->T("Too large"));
 					goto bail;
 				}
-				allBytes += zstat.size;
+				allBytes += (int64_t)zstat.size;
 			}
 		}
 		g_OSD.SetProgressBar("install", di->T("Installing..."), 0.0f, info.numFiles, (i + 1) * 0.1f, 0.1f);
@@ -717,6 +740,10 @@ bool GameManager::ExtractZipContents(struct zip *z, const Path &dest, const ZipF
 	// Now, loop through again in a second pass, writing files.
 	for (int i = 0; i < info.numFiles; i++) {
 		const char *fn = zip_get_name(z, i, 0);
+		if (!fn) {
+			// zip_get_name() returns NULL on a corrupted central directory entry.
+			continue;
+		}
 		// Note that we do NOT write files that are not in a directory, to avoid random
 		// README files etc. (unless allowRoot is true.)
 		if (fileAllowed(fn) && strlen(fn) > (size_t)info.stripChars) {
@@ -807,7 +834,12 @@ bool GameManager::InstallMemstickZip(const Path &zipfile, const Path &dest, cons
 
 bool GameManager::InstallZippedISO(struct zip *z, int isoFileIndex, const Path &destDir) {
 	// Let's place the output file in the currently selected Games directory.
-	std::string fn = zip_get_name(z, isoFileIndex, 0);
+	const char *fnPtr = zip_get_name(z, isoFileIndex, 0);
+	if (!fnPtr) {
+		// zip_get_name() returns NULL on a corrupted central directory entry.
+		return false;
+	}
+	std::string fn = fnPtr;
 	size_t nameOffset = fn.rfind('/');
 	if (nameOffset == std::string::npos) {
 		nameOffset = 0;
@@ -816,6 +848,7 @@ bool GameManager::InstallZippedISO(struct zip *z, int isoFileIndex, const Path &
 	}
 	size_t allBytes = 1;
 	struct zip_stat zstat;
+	zip_stat_init(&zstat);
 	if (zip_stat_index(z, isoFileIndex, 0, &zstat) >= 0) {
 		allBytes += zstat.size;
 	}
@@ -835,7 +868,7 @@ bool GameManager::InstallZippedISO(struct zip *z, int isoFileIndex, const Path &
 	}
 	outputISOFilename = outputISOFilename / name;
 
-	size_t bytesCopied = 0;
+	int64_t bytesCopied = 0;
 	bool success = false;
 	auto di = GetI18NCategory(I18NCat::DIALOG);
 	g_OSD.SetProgressBar("install", di->T("Installing..."), 0.0f, 0.0f, 0.0f, 0.1f);

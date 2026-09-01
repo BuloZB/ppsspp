@@ -915,8 +915,10 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 	: vulkan_(vulkan), renderManager_(vulkan, useRenderThread, frameTimeHistory_) {
 	shaderLanguageDesc_.Init(GLSL_VULKAN);
 
-	// Make sure that the surface has been initialized.
-	_dbg_assert_(vulkan->GetAvailablePresentModes().size() > 0);
+	// Make sure that the surface has been initialized. Doesn't apply when a pluggable presentation
+	// backend (see VulkanPresentation.h) is in use instead of a real swapchain/surface - there's no
+	// present mode concept there at all.
+	_dbg_assert_(vulkan->GetPresentation() || vulkan->GetAvailablePresentModes().size() > 0);
 
 	caps_.fragmentShaderFullPrecisionFloat = true;
 	caps_.coordConvention = CoordConvention::Vulkan;
@@ -963,12 +965,19 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 	caps_.presentInstantModeChange = false;  // TODO: Fix this with some work in VulkanContext
 	caps_.presentModesSupported = (PresentMode)0;
 
-	for (auto mode : vulkan->GetAvailablePresentModes()) {
-		switch (mode) {
-		case VK_PRESENT_MODE_FIFO_KHR: caps_.presentModesSupported |= PresentMode::FIFO; break;
-		case VK_PRESENT_MODE_IMMEDIATE_KHR: caps_.presentModesSupported |= PresentMode::IMMEDIATE; break;
-		case VK_PRESENT_MODE_MAILBOX_KHR: caps_.presentModesSupported |= PresentMode::MAILBOX; break;
-		default: break;  // Ignore any other modes.
+	if (vulkan->GetPresentation()) {
+		// No real present modes exist in this model (the host, e.g. libretro, owns real presentation
+		// and controls its own timing) - we always hand back one finished frame at a time serially,
+		// which is closest in spirit to FIFO.
+		caps_.presentModesSupported = PresentMode::FIFO;
+	} else {
+		for (auto mode : vulkan->GetAvailablePresentModes()) {
+			switch (mode) {
+			case VK_PRESENT_MODE_FIFO_KHR: caps_.presentModesSupported |= PresentMode::FIFO; break;
+			case VK_PRESENT_MODE_IMMEDIATE_KHR: caps_.presentModesSupported |= PresentMode::IMMEDIATE; break;
+			case VK_PRESENT_MODE_MAILBOX_KHR: caps_.presentModesSupported |= PresentMode::MAILBOX; break;
+			default: break;  // Ignore any other modes.
+			}
 		}
 	}
 
@@ -1011,10 +1020,13 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 	// Only support MSAA levels that have support for all three of color, depth, stencil.
 
 	bool multisampleAllowed = true;
+	bool turnip = false;
 
     caps_.deviceID = deviceProps.deviceID;
 
     if (caps_.vendor == GPUVendor::VENDOR_QUALCOMM) {
+		turnip = containsNoCase(deviceProps.deviceName, "turnip");
+
 		if (caps_.deviceID < 0x6000000) { // On sub 6xx series GPUs, disallow multisample.
 			INFO_LOG(Log::G3D, "Multisampling was disabled due to old driver version (Adreno)");
 			multisampleAllowed = false;
@@ -1030,7 +1042,7 @@ VKContext::VKContext(VulkanContext *vulkan, bool useRenderThread)
 		// Color write mask not masking write in certain scenarios with a depth test, see #10421.
 		// Known still present on driver 0x80180000 and Adreno 5xx (possibly more.)
 		// Known working on driver 0x801EA000 and Adreno 620.
-		if (deviceProps.driverVersion < 0x801EA000 || deviceProps.deviceID < 0x06000000)
+		if (!turnip && (deviceProps.driverVersion < 0x801EA000 || deviceProps.deviceID < 0x06000000))
 			bugs_.Infest(Bugs::COLORWRITEMASK_BROKEN_WITH_DEPTHTEST);
 
 		// Trying to follow all the rules in https://registry.khronos.org/vulkan/specs/1.3/html/vkspec.html#synchronization-pipeline-barriers-subpass-self-dependencies

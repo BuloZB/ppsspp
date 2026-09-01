@@ -233,6 +233,9 @@
     <ClCompile Include="..\..\Common\Data\Hash\Hash.cpp">
       <Filter>Data\Hash</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\Common\Data\Text\Demangle.cpp">
+      <Filter>Data\Text</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\Common\Data\Text\I18n.cpp">
       <Filter>Data\Text</Filter>
     </ClCompile>
@@ -380,9 +383,6 @@
     <ClCompile Include="..\..\Common\Render\Text\draw_text_android.cpp">
       <Filter>Render\Text</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\Common\Render\Text\draw_text_qt.cpp">
-      <Filter>Render\Text</Filter>
-    </ClCompile>
     <ClCompile Include="..\..\Common\Render\Text\draw_text_uwp.cpp">
       <Filter>Render\Text</Filter>
     </ClCompile>
@@ -467,7 +467,10 @@
     <ClCompile Include="..\..\Common\Net\HTTPNaettRequest.cpp">
       <Filter>Net</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\ext\naett\naett.c">
+    <ClCompile Include="..\..\ext\naett\src\naett_core.c">
+      <Filter>ext\naett</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\ext\naett\src\naett_win.c">
       <Filter>ext\naett</Filter>
     </ClCompile>
     <ClCompile Include="..\..\ext\minimp3\minimp3.cpp">
@@ -590,6 +593,9 @@
     </ClCompile>
     <ClCompile Include="..\..\ext\pugixml\pugixml.cpp">
       <Filter>ext\pugixml</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Common\UI\ScreenManager.cpp">
+      <Filter>UI</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -720,6 +726,9 @@
     </ClInclude>
     <ClInclude Include="..\..\Common\Data\Hash\Hash.h">
       <Filter>Data\Hash</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Common\Data\Text\Demangle.h">
+      <Filter>Data\Text</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Common\Data\Text\I18n.h">
       <Filter>Data\Text</Filter>
@@ -880,9 +889,6 @@
     <ClInclude Include="..\..\Common\Render\Text\draw_text_android.h">
       <Filter>Render\Text</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\Common\Render\Text\draw_text_qt.h">
-      <Filter>Render\Text</Filter>
-    </ClInclude>
     <ClInclude Include="..\..\Common\Render\Text\draw_text_uwp.h">
       <Filter>Render\Text</Filter>
     </ClInclude>
@@ -993,6 +999,9 @@
     </ClInclude>
     <ClInclude Include="..\..\Common\Net\HTTPNaettRequest.h">
       <Filter>Net</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\ext\naett\src\naett_internal.h">
+      <Filter>ext\naett</Filter>
     </ClInclude>
     <ClInclude Include="..\..\ext\naett\naett.h">
       <Filter>ext\naett</Filter>
@@ -1144,6 +1153,9 @@
     </ClInclude>
     <ClInclude Include="..\..\ext\pugixml\pugixml.hpp">
       <Filter>ext\pugixml</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Common\UI\ScreenManager.h">
+      <Filter>UI</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
